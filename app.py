@@ -18,8 +18,27 @@ from werkzeug.exceptions import HTTPException
 
 
 SYSTEM_DATABASES = {"information_schema", "mysql", "performance_schema", "sys"}
-IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9_$]+$")
 MAX_SQL_PREVIEW_ROWS = 500
+SQL_HISTORY_LIMIT = 20
+MAX_IDENTIFIER_LENGTH = 128
+
+NUMERIC_DATA_TYPES = {
+    "tinyint",
+    "smallint",
+    "mediumint",
+    "int",
+    "integer",
+    "bigint",
+    "decimal",
+    "numeric",
+    "float",
+    "double",
+    "real",
+}
+TEXTAREA_DATA_TYPES = {"text", "tinytext", "mediumtext", "longtext", "json"}
+DATETIME_DATA_TYPES = {"datetime", "timestamp"}
+DATE_DATA_TYPES = {"date"}
+TIME_DATA_TYPES = {"time"}
 
 
 @dataclass
@@ -73,7 +92,58 @@ def quote_identifier(name: str) -> str:
 
 
 def safe_database_name(name: str) -> bool:
-    return bool(IDENTIFIER_PATTERN.fullmatch(name))
+    if not name:
+        return False
+    if len(name) > MAX_IDENTIFIER_LENGTH:
+        return False
+    if "\x00" in name or "/" in name:
+        return False
+    return True
+
+
+def is_boolean_column(column: ColumnMeta) -> bool:
+    data_type = column.data_type.lower()
+    column_type = column.column_type.lower()
+    return data_type in {"boolean", "bool"} or column_type in {"tinyint(1)", "bit(1)"}
+
+
+def parse_enum_set_options(column_type: str) -> list[str]:
+    lowered = column_type.lower()
+    if not (lowered.startswith("enum(") or lowered.startswith("set(")):
+        return []
+    return [match.replace("\\'", "'").replace("\\\\", "\\") for match in re.findall(r"'((?:[^'\\]|\\.)*)'", column_type)]
+
+
+def column_input_type(column: ColumnMeta) -> str:
+    data_type = column.data_type.lower()
+    if is_boolean_column(column):
+        return "boolean"
+    if data_type in TEXTAREA_DATA_TYPES:
+        return "textarea"
+    if data_type in NUMERIC_DATA_TYPES:
+        return "number"
+    if data_type in DATETIME_DATA_TYPES:
+        return "datetime-local"
+    if data_type in DATE_DATA_TYPES:
+        return "date"
+    if data_type in TIME_DATA_TYPES:
+        return "time"
+    if data_type in {"enum", "set"}:
+        return "select"
+    return "text"
+
+
+def column_select_options(column: ColumnMeta) -> list[tuple[str, str]]:
+    input_type = column_input_type(column)
+    if input_type == "boolean":
+        return [("1", "True"), ("0", "False")]
+    if input_type == "select":
+        return [(option, option) for option in parse_enum_set_options(column.column_type)]
+    return []
+
+
+def column_number_step(column: ColumnMeta) -> str:
+    return "any" if column.data_type.lower() in {"decimal", "numeric", "float", "double", "real"} else "1"
 
 
 def mysql_config() -> dict[str, Any]:
@@ -277,8 +347,36 @@ def format_form_value(value: Any) -> str:
     return str(value)
 
 
+def format_input_value(column: ColumnMeta, value: Any) -> str:
+    if value is None:
+        return ""
+
+    input_type = column_input_type(column)
+    string_value = format_form_value(value)
+
+    if input_type == "boolean":
+        lowered = string_value.lower()
+        if lowered in {"1", "true", "t", "yes", "y"}:
+            return "1"
+        if lowered in {"0", "false", "f", "no", "n"}:
+            return "0"
+        return ""
+
+    if input_type == "datetime-local":
+        if " " in string_value:
+            string_value = string_value.replace(" ", "T", 1)
+        return string_value
+
+    return string_value
+
+
 def normalize_form_value(raw_value: str, column: ColumnMeta, for_insert: bool) -> Any:
     if raw_value != "":
+        input_type = column_input_type(column)
+        if input_type == "datetime-local":
+            return raw_value.replace("T", " ", 1)
+        if input_type == "boolean":
+            return 1 if raw_value in {"1", "true", "True", "on"} else 0
         return raw_value
 
     extra_upper = column.extra.upper()
@@ -302,6 +400,52 @@ def build_pk_filters(pk_columns: list[str], values: Mapping[str, Any]) -> list[t
             return None
         filters.append((column, values[key]))
     return filters
+
+
+def get_sql_history() -> list[dict[str, str]]:
+    raw_history = session.get("sql_history", [])
+    if not isinstance(raw_history, list):
+        return []
+
+    normalized: list[dict[str, str]] = []
+    for item in raw_history:
+        if not isinstance(item, dict):
+            continue
+        query = str(item.get("query", "")).strip()
+        if not query:
+            continue
+        normalized.append(
+            {
+                "db": str(item.get("db", "")).strip(),
+                "query": query,
+                "executed_at": str(item.get("executed_at", "")).strip(),
+            }
+        )
+
+    return normalized[:SQL_HISTORY_LIMIT]
+
+
+def push_sql_history(db_name: str, query_text: str) -> None:
+    normalized_query = query_text.strip()
+    if not normalized_query:
+        return
+
+    new_item = {
+        "db": db_name,
+        "query": normalized_query,
+        "executed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    existing = [item for item in get_sql_history() if not (item["db"] == db_name and item["query"] == normalized_query)]
+    session["sql_history"] = [new_item] + existing[: SQL_HISTORY_LIMIT - 1]
+    session.modified = True
+
+
+def coerce_positive_int(value: Any, default: int) -> int:
+    try:
+        parsed = int(str(value))
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
 
 
 def fetch_row_by_pk(
@@ -373,6 +517,9 @@ def inject_common() -> dict[str, Any]:
         "mysql_port": session.get("mysql_port", 3306),
         "mysql_user": session.get("mysql_user"),
         "server_version": session.get("server_version", "Unknown"),
+        "column_input_type": column_input_type,
+        "column_select_options": column_select_options,
+        "column_number_step": column_number_step,
     }
 
 
@@ -491,7 +638,7 @@ def create_database() -> Any:
 
             if not safe_database_name(database_name):
                 flash(
-                    "Имя БД может содержать только буквы, цифры, '_' и '$'.",
+                    "Имя БД не должно быть пустым и не может содержать '/'.",
                     "error",
                 )
                 return render_template(
@@ -590,13 +737,26 @@ def sql_console(db_name: str) -> Any:
     if not safe_database_name(db_name):
         abort(404)
 
-    query_text = request.form.get("sql_query", "SELECT NOW();").strip()
+    query_text = "SELECT NOW();"
+    if request.method == "POST":
+        query_text = request.form.get("sql_query", "SELECT NOW();").strip()
     result_columns: list[str] = []
     result_rows: list[list[str]] = []
     result_count = 0
     affected_rows: int | None = None
     query_ms: float | None = None
     result_truncated = False
+    sql_history = [item for item in get_sql_history() if item["db"] == db_name]
+
+    if request.method == "GET":
+        history_raw = request.args.get("history")
+        if history_raw is not None:
+            try:
+                history_index = int(history_raw)
+                if 0 <= history_index < len(sql_history):
+                    query_text = sql_history[history_index]["query"]
+            except ValueError:
+                pass
 
     try:
         conn = mysql_connect()
@@ -626,9 +786,13 @@ def sql_console(db_name: str) -> Any:
                             ]
                             result_count = len(result_rows)
                             result_truncated = result_count >= MAX_SQL_PREVIEW_ROWS
+                            push_sql_history(db_name, query_text)
+                            sql_history = [item for item in get_sql_history() if item["db"] == db_name]
                             flash("SQL-запрос выполнен.", "success")
                         else:
                             affected_rows = max(cur.rowcount, 0)
+                            push_sql_history(db_name, query_text)
+                            sql_history = [item for item in get_sql_history() if item["db"] == db_name]
                             flash(
                                 f"SQL-запрос выполнен. Затронуто строк: {affected_rows}.",
                                 "success",
@@ -652,6 +816,7 @@ def sql_console(db_name: str) -> Any:
         affected_rows=affected_rows,
         query_ms=round(query_ms, 2) if query_ms is not None else None,
         result_truncated=result_truncated,
+        sql_history=sql_history,
     )
 
 
@@ -664,10 +829,10 @@ def table_view(db_name: str, table_name: str) -> Any:
         abort(404)
 
     limit_raw = request.args.get("limit", "50")
-    try:
-        limit = max(1, min(500, int(limit_raw)))
-    except ValueError:
-        limit = 50
+    limit = min(500, coerce_positive_int(limit_raw, 50))
+    page_raw = request.args.get("page", "1")
+    page = coerce_positive_int(page_raw, 1)
+    offset = (page - 1) * limit
 
     try:
         conn = mysql_connect()
@@ -683,14 +848,17 @@ def table_view(db_name: str, table_name: str) -> Any:
             with conn.cursor() as cur:
                 sql = (
                     f"SELECT * FROM {quote_identifier(db_name)}."
-                    f"{quote_identifier(table_name)} LIMIT {limit}"
+                    f"{quote_identifier(table_name)} LIMIT %s OFFSET %s"
                 )
-                cur.execute(sql)
-                raw_rows = cur.fetchall()
+                cur.execute(sql, (limit + 1, offset))
+                fetched_rows = cur.fetchall()
                 query_ms = (perf_counter() - start) * 1000
                 columns: list[str] = (
                     [str(column[0]) for column in cur.description] if cur.description else []
                 )
+
+            has_next_page = len(fetched_rows) > limit
+            raw_rows = fetched_rows[:limit]
 
             row_items: list[dict[str, Any]] = []
             for raw_row in raw_rows:
@@ -710,6 +878,8 @@ def table_view(db_name: str, table_name: str) -> Any:
                 (t.rows_count for t in table_items if t.name == table_name),
                 len(raw_rows),
             )
+            rows_from = offset + 1 if raw_rows else 0
+            rows_to = offset + len(raw_rows)
         finally:
             conn.close()
     except HTTPException:
@@ -727,6 +897,14 @@ def table_view(db_name: str, table_name: str) -> Any:
         columns=columns,
         row_items=row_items,
         limit=limit,
+        page=page,
+        has_prev_page=page > 1,
+        has_next_page=has_next_page,
+        prev_page=page - 1,
+        next_page=page + 1,
+        offset=offset,
+        rows_from=rows_from,
+        rows_to=rows_to,
         query_ms=round(query_ms, 2),
         estimated_rows=estimated_rows,
         has_primary_key=bool(primary_key_columns),
@@ -813,6 +991,8 @@ def create_row(db_name: str, table_name: str) -> Any:
         editable_columns=editable_columns if "editable_columns" in locals() else [],
         form_values=form_values if "form_values" in locals() else {},
         pk_filters=[],
+        return_page=1,
+        return_limit=50,
     )
 
 
@@ -823,6 +1003,10 @@ def edit_row(db_name: str, table_name: str) -> Any:
 
     if not safe_database_name(db_name) or not safe_database_name(table_name):
         abort(404)
+
+    source_values = request.form if request.method == "POST" else request.args
+    return_page = coerce_positive_int(source_values.get("return_page"), 1)
+    return_limit = min(500, coerce_positive_int(source_values.get("return_limit"), 50))
 
     try:
         conn = mysql_connect()
@@ -838,23 +1022,40 @@ def edit_row(db_name: str, table_name: str) -> Any:
             if not primary_key_columns:
                 flash("Редактирование доступно только для таблиц с PRIMARY KEY.", "error")
                 return redirect(
-                    url_for("table_view", db_name=db_name, table_name=table_name)
+                    url_for(
+                        "table_view",
+                        db_name=db_name,
+                        table_name=table_name,
+                        page=return_page,
+                        limit=return_limit,
+                    )
                 )
 
-            source_values = request.form if request.method == "POST" else request.args
             pk_filters = build_pk_filters(primary_key_columns, source_values)
 
             if not pk_filters:
                 flash("Не удалось определить PRIMARY KEY для выбранной строки.", "error")
                 return redirect(
-                    url_for("table_view", db_name=db_name, table_name=table_name)
+                    url_for(
+                        "table_view",
+                        db_name=db_name,
+                        table_name=table_name,
+                        page=return_page,
+                        limit=return_limit,
+                    )
                 )
 
             existing_row = fetch_row_by_pk(conn, db_name, table_name, pk_filters)
             if not existing_row:
                 flash("Строка не найдена.", "error")
                 return redirect(
-                    url_for("table_view", db_name=db_name, table_name=table_name)
+                    url_for(
+                        "table_view",
+                        db_name=db_name,
+                        table_name=table_name,
+                        page=return_page,
+                        limit=return_limit,
+                    )
                 )
 
             editable_columns = [
@@ -870,7 +1071,7 @@ def edit_row(db_name: str, table_name: str) -> Any:
                 }
             else:
                 form_values = {
-                    column.name: format_form_value(existing_row.get(column.name))
+                    column.name: format_input_value(column, existing_row.get(column.name))
                     for column in editable_columns
                 }
 
@@ -902,7 +1103,13 @@ def edit_row(db_name: str, table_name: str) -> Any:
                         )
                     flash("Строка успешно обновлена.", "success")
                     return redirect(
-                        url_for("table_view", db_name=db_name, table_name=table_name)
+                        url_for(
+                            "table_view",
+                            db_name=db_name,
+                            table_name=table_name,
+                            page=return_page,
+                            limit=return_limit,
+                        )
                     )
         finally:
             conn.close()
@@ -921,6 +1128,8 @@ def edit_row(db_name: str, table_name: str) -> Any:
         editable_columns=editable_columns if "editable_columns" in locals() else [],
         form_values=form_values if "form_values" in locals() else {},
         pk_filters=pk_filters if "pk_filters" in locals() else [],
+        return_page=return_page,
+        return_limit=return_limit,
     )
 
 
@@ -932,6 +1141,9 @@ def delete_row(db_name: str, table_name: str) -> Any:
     if not safe_database_name(db_name) or not safe_database_name(table_name):
         abort(404)
 
+    return_page = coerce_positive_int(request.form.get("return_page"), 1)
+    return_limit = min(500, coerce_positive_int(request.form.get("return_limit"), 50))
+
     try:
         conn = mysql_connect()
         try:
@@ -942,14 +1154,26 @@ def delete_row(db_name: str, table_name: str) -> Any:
             if not pk_columns:
                 flash("Удаление доступно только для таблиц с PRIMARY KEY.", "error")
                 return redirect(
-                    url_for("table_view", db_name=db_name, table_name=table_name)
+                    url_for(
+                        "table_view",
+                        db_name=db_name,
+                        table_name=table_name,
+                        page=return_page,
+                        limit=return_limit,
+                    )
                 )
 
             pk_filters = build_pk_filters(pk_columns, request.form)
             if not pk_filters:
                 flash("Не удалось определить PRIMARY KEY для удаления.", "error")
                 return redirect(
-                    url_for("table_view", db_name=db_name, table_name=table_name)
+                    url_for(
+                        "table_view",
+                        db_name=db_name,
+                        table_name=table_name,
+                        page=return_page,
+                        limit=return_limit,
+                    )
                 )
 
             where_sql = " AND ".join(
@@ -976,7 +1200,15 @@ def delete_row(db_name: str, table_name: str) -> Any:
     except Exception as exc:  # pragma: no cover - runtime-specific
         flash(f"Ошибка удаления строки: {exc}", "error")
 
-    return redirect(url_for("table_view", db_name=db_name, table_name=table_name))
+    return redirect(
+        url_for(
+            "table_view",
+            db_name=db_name,
+            table_name=table_name,
+            page=return_page,
+            limit=return_limit,
+        )
+    )
 
 
 @app.errorhandler(404)

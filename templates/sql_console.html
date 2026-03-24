@@ -77,6 +77,20 @@
                     </div>
                 </form>
 
+                {% if sql_history %}
+                <div class="mb-5 bg-white border border-slate-200 rounded-xl shadow-sm p-4">
+                    <p class="text-[11px] font-bold text-slate-400 uppercase tracking-widest mb-3">История запросов (сессия)</p>
+                    <div class="space-y-2 max-h-44 overflow-y-auto">
+                        {% for item in sql_history %}
+                        <a href="{{ url_for('sql_console', db_name=current_db, history=loop.index0) }}" class="block border border-slate-200 rounded-lg px-3 py-2 hover:border-slate-900 transition-colors">
+                            <div class="mono text-xs text-slate-700 truncate">{{ item.query }}</div>
+                            <div class="text-[10px] text-slate-400 mt-1">{{ item.executed_at }}</div>
+                        </a>
+                        {% endfor %}
+                    </div>
+                </div>
+                {% endif %}
+
                 {% if query_ms is not none %}
                 <div class="mb-4 text-xs text-slate-500 mono">Execution: {{ query_ms }} ms</div>
                 {% endif %}
@@ -86,8 +100,8 @@
                 {% endif %}
 
                 {% if result_columns %}
-                <div class="bg-white border border-slate-200 rounded-md shadow-sm overflow-auto">
-                    <table class="w-full text-left border-collapse">
+                <div class="bg-white border border-slate-200 rounded-md shadow-sm overflow-x-auto">
+                    <table class="min-w-max w-full text-left border-collapse">
                         <thead>
                             <tr class="bg-slate-50 border-b border-slate-200 text-[11px] font-bold text-slate-500 uppercase tracking-wider">
                                 {% for col in result_columns %}

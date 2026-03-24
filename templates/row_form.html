@@ -72,6 +72,8 @@
                         <input type="hidden" name="pk_{{ pk[0] }}" value="{{ pk[1] }}">
                         {% endfor %}
                     {% endif %}
+                    <input type="hidden" name="return_page" value="{{ return_page }}">
+                    <input type="hidden" name="return_limit" value="{{ return_limit }}">
 
                     <div class="mb-5">
                         <h1 class="text-xl font-bold tracking-tight text-slate-900">
@@ -89,10 +91,26 @@
                                 {% if column.is_nullable %}<span class="text-emerald-500"> nullable</span>{% endif %}
                             </label>
 
-                            {% if column.data_type in ['text','longtext','mediumtext','tinytext','json'] %}
+                            {% set input_type = column_input_type(column) %}
+                            {% if input_type == 'textarea' %}
                             <textarea name="{{ column.name }}" rows="4" class="mono w-full px-3 py-2 border border-slate-300 rounded-lg outline-none focus:ring-1 focus:ring-slate-900 focus:border-slate-900">{{ form_values.get(column.name, '') }}</textarea>
+                            {% elif input_type == 'select' or input_type == 'boolean' %}
+                            <select name="{{ column.name }}" class="mono w-full px-3 py-2 border border-slate-300 rounded-lg outline-none focus:ring-1 focus:ring-slate-900 focus:border-slate-900 bg-white">
+                                {% if column.is_nullable %}
+                                <option value="">NULL</option>
+                                {% endif %}
+                                {% for value, label in column_select_options(column) %}
+                                <option value="{{ value }}" {% if form_values.get(column.name, '') == value %}selected{% endif %}>{{ label }}</option>
+                                {% endfor %}
+                            </select>
                             {% else %}
-                            <input type="text" name="{{ column.name }}" value="{{ form_values.get(column.name, '') }}" class="mono w-full px-3 py-2 border border-slate-300 rounded-lg outline-none focus:ring-1 focus:ring-slate-900 focus:border-slate-900">
+                            <input
+                                type="{{ input_type }}"
+                                name="{{ column.name }}"
+                                value="{{ form_values.get(column.name, '') }}"
+                                {% if input_type == 'number' %}step="{{ column_number_step(column) }}"{% endif %}
+                                class="mono w-full px-3 py-2 border border-slate-300 rounded-lg outline-none focus:ring-1 focus:ring-slate-900 focus:border-slate-900"
+                            >
                             {% endif %}
                         </div>
                         {% else %}
