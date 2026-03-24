@@ -9,15 +9,20 @@
         body { font-family: 'Inter', sans-serif; letter-spacing: -0.01em; }
         .mono { font-family: 'JetBrains Mono', monospace; font-size: 13px; }
         .data-grid-wrap {
+            display: block;
             width: 100%;
+            max-width: 100%;
             overflow-x: auto;
             overflow-y: hidden;
             -webkit-overflow-scrolling: touch;
         }
         .data-grid {
-            width: 100%;
-            min-width: max-content;
+            border-collapse: collapse;
+            width: max-content;
+            min-width: 100%;
         }
+        .copy-btn { opacity: 0; transition: opacity .12s ease; }
+        tr:hover .copy-btn { opacity: 1; }
         ::-webkit-scrollbar { width: 6px; height: 6px; }
         ::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 10px; }
     </style>
@@ -61,11 +66,12 @@
                     <div class="h-4 w-[1px] bg-slate-200"></div>
                     <div class="flex gap-1">
                         <button class="px-3 py-1 text-xs font-medium bg-slate-900 text-white rounded">Обзор</button>
+                        <a href="{{ url_for('table_structure', db_name=current_db, table_name=current_table, tables_q=tables_q) }}" class="px-3 py-1 text-xs font-medium text-slate-500 hover:bg-slate-100 rounded">Structure</a>
                         <a href="{{ url_for('sql_console', db_name=current_db, table=current_table, return_page=page, return_limit=limit, tables_q=tables_q) }}" class="px-3 py-1 text-xs font-medium text-slate-500 hover:bg-slate-100 rounded">SQL</a>
                     </div>
                 </div>
                 <div class="flex items-center gap-3">
-                    <a href="{{ url_for('create_row', db_name=current_db, table_name=current_table, return_page=page, return_limit=limit, return_tables_q=tables_q) }}" class="text-xs text-indigo-600 font-medium hover:underline">+ Добавить строку</a>
+                    <a href="{{ url_for('create_row', db_name=current_db, table_name=current_table, return_page=page, return_limit=limit, return_tables_q=tables_q, return_query=current_query) }}" class="text-xs text-indigo-600 font-medium hover:underline">+ Добавить строку</a>
                     <form method="post" action="{{ url_for('logout') }}" data-confirm="Выйти из текущей сессии?">
                         <button class="text-xs text-slate-400 hover:text-slate-900">Выход</button>
                     </form>
@@ -88,61 +94,237 @@
                 <div class="mb-4 flex items-center justify-between gap-4 bg-white border border-slate-200 rounded-md px-4 py-2 shadow-sm">
                     <div class="flex items-center gap-3 overflow-x-auto">
                         <span class="w-2 h-2 rounded-full bg-green-500"></span>
-                        <code class="mono text-slate-600">SELECT * FROM `{{ current_table }}` LIMIT {{ limit }} OFFSET {{ offset }};</code>
+                        <code class="mono text-slate-600">{{ query_preview }}</code>
                     </div>
-                    <span class="text-[10px] text-slate-400 font-mono uppercase">{{ query_ms }}ms</span>
+                    <div class="flex items-center gap-2">
+                        {% if sort_col %}
+                        <a href="{{ url_for('table_view', db_name=current_db, table_name=current_table) }}?{{ clear_sort_query }}" class="px-2 py-1 border border-slate-200 rounded text-[11px] hover:bg-slate-50">Сбросить sort</a>
+                        {% endif %}
+                        <span class="text-[10px] text-slate-400 font-mono uppercase">{{ query_ms }}ms</span>
+                    </div>
                 </div>
+
+                <form method="get" action="{{ url_for('table_view', db_name=current_db, table_name=current_table) }}" class="mb-4 bg-white border border-slate-200 rounded-md shadow-sm p-4 space-y-3" id="filters-form">
+                    <input type="hidden" name="limit" value="{{ limit }}">
+                    <input type="hidden" name="tables_q" value="{{ tables_q }}">
+                    <input type="hidden" name="page" value="1">
+
+                    <div class="flex flex-wrap items-center gap-3">
+                        <label class="text-xs text-slate-500">Логика</label>
+                        <select name="filter_logic" class="mono text-xs border border-slate-300 rounded px-2 py-1 bg-white">
+                            <option value="AND" {% if filter_logic == 'AND' %}selected{% endif %}>AND</option>
+                            <option value="OR" {% if filter_logic == 'OR' %}selected{% endif %}>OR</option>
+                        </select>
+                        <button type="button" id="add-filter-row" class="px-2 py-1 border border-slate-300 rounded text-xs hover:bg-slate-50">+ Условие</button>
+                        <button type="submit" class="px-2.5 py-1 bg-slate-900 text-white rounded text-xs">Применить</button>
+                        <a href="{{ url_for('table_view', db_name=current_db, table_name=current_table, limit=limit, page=1, tables_q=tables_q) }}" class="px-2 py-1 border border-slate-300 rounded text-xs hover:bg-slate-50">Сбросить</a>
+                    </div>
+
+                    <div id="filter-rows" class="space-y-2">
+                        {% for row in filter_rows %}
+                        <div class="filter-row grid grid-cols-12 gap-2 items-start">
+                            <div class="col-span-12 md:col-span-3">
+                                <select name="filter_column" class="filter-column mono w-full text-xs border border-slate-300 rounded px-2 py-1 bg-white">
+                                    <option value="">Колонка...</option>
+                                    {% for col in column_names %}
+                                    <option value="{{ col }}" {% if row.column == col %}selected{% endif %}>{{ col }}</option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+                            <div class="col-span-12 md:col-span-2">
+                                <select name="filter_op" class="filter-op mono w-full text-xs border border-slate-300 rounded px-2 py-1 bg-white">
+                                    {% for op_value, op_label in filter_operator_items %}
+                                    <option value="{{ op_value }}" {% if row.op == op_value %}selected{% endif %}>{{ op_label }}</option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+                            <div class="col-span-12 md:col-span-3 filter-value-wrap">
+                                <input type="text" name="filter_value" value="{{ row.value }}" placeholder="Значение" class="filter-value mono w-full text-xs border border-slate-300 rounded px-2 py-1">
+                            </div>
+                            <div class="col-span-12 md:col-span-3 filter-value-to-wrap">
+                                <input type="text" name="filter_value_to" value="{{ row.value_to }}" placeholder="До (для BETWEEN)" class="filter-value-to mono w-full text-xs border border-slate-300 rounded px-2 py-1">
+                            </div>
+                            <div class="col-span-12 md:col-span-1 flex justify-end">
+                                <button type="button" class="remove-filter-row px-2 py-1 text-xs border border-slate-300 rounded hover:bg-slate-50">✕</button>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </form>
+
+                <form method="post" action="{{ url_for('bulk_rows', db_name=current_db, table_name=current_table) }}" id="bulk-form" data-loading-form class="mb-3 bg-white border border-slate-200 rounded-md px-3 py-2 shadow-sm flex flex-wrap items-center gap-2">
+                    <input type="hidden" name="return_page" value="{{ page }}">
+                    <input type="hidden" name="return_limit" value="{{ limit }}">
+                    <input type="hidden" name="return_tables_q" value="{{ tables_q }}">
+                    <input type="hidden" name="return_query" value="{{ current_query }}">
+                    <select name="bulk_action" id="bulk-action" class="mono text-xs border border-slate-300 rounded px-2 py-1 bg-white">
+                        <option value="delete">Bulk delete</option>
+                        <option value="update">Bulk update column</option>
+                        <option value="export_csv">Export CSV</option>
+                        <option value="export_json">Export JSON</option>
+                    </select>
+
+                    <div id="bulk-update-fields" class="hidden flex flex-wrap items-center gap-2">
+                        <select name="bulk_update_column" class="mono text-xs border border-slate-300 rounded px-2 py-1 bg-white">
+                            {% for column in bulk_update_columns %}
+                            <option value="{{ column.name }}">{{ column.name }} ({{ column.column_type }})</option>
+                            {% endfor %}
+                        </select>
+                        <input type="text" name="bulk_update_value" placeholder="Новое значение" class="mono text-xs border border-slate-300 rounded px-2 py-1">
+                        <label class="inline-flex items-center gap-1 text-xs text-slate-600">
+                            <input type="checkbox" name="bulk_set_null" value="1">
+                            SET NULL
+                        </label>
+                    </div>
+
+                    <button type="submit" id="bulk-submit" data-loading-text="Обработка..." class="px-2.5 py-1 bg-slate-900 text-white rounded text-xs">Применить к выбранным</button>
+                    <span id="selected-counter" class="text-xs text-slate-500">Выбрано: 0</span>
+                </form>
 
                 <div class="bg-white border border-slate-200 rounded-md shadow-sm w-full">
                     <div class="data-grid-wrap">
-                        <table class="data-grid table-auto text-left border-collapse">
-                            <thead>
-                                <tr class="bg-slate-50 border-b border-slate-200 text-[11px] font-bold text-slate-500 uppercase tracking-wider">
-                                    {% for col in columns %}
-                                    <th class="p-3 min-w-[180px] border-r border-slate-100 whitespace-nowrap">{{ col }}</th>
+                        <table class="data-grid table-auto text-left">
+                                <thead>
+                                    <tr class="bg-slate-50 border-b border-slate-200 text-[11px] font-bold text-slate-500 uppercase tracking-wider">
+                                        <th class="p-3 min-w-[50px] border-r border-slate-100">
+                                            <input type="checkbox" id="toggle-all-rows" class="align-middle">
+                                        </th>
+                                        {% for col in columns %}
+                                        <th class="p-3 min-w-[180px] border-r border-slate-100 whitespace-nowrap">
+                                            <a href="{{ url_for('table_view', db_name=current_db, table_name=current_table) }}?{{ sort_queries[col] }}" class="inline-flex items-center gap-1 hover:text-slate-900">
+                                                <span>{{ col }}</span>
+                                                {% if sort_col == col %}
+                                                <span class="text-indigo-600">{% if sort_dir == 'asc' %}↑{% else %}↓{% endif %}</span>
+                                                {% else %}
+                                                <span class="text-slate-300">↕</span>
+                                                {% endif %}
+                                            </a>
+                                        </th>
+                                        {% endfor %}
+                                        <th class="p-3 min-w-[230px] whitespace-nowrap">Действия</th>
+                                    </tr>
+                                </thead>
+                                <tbody class="text-sm mono text-slate-700">
+                                    {% for row in row_items %}
+                                    {% set row_index = loop.index0 %}
+                                    <tr class="border-b border-slate-100 hover:bg-slate-50 group">
+                                        <td class="p-3 border-r border-slate-100 whitespace-nowrap">
+                                            {% if has_primary_key and row.has_pk_values %}
+                                            <input type="checkbox" class="row-selector" name="selected_rows" value="{{ row.pk_token | e }}" form="bulk-form">
+                                            {% else %}
+                                            <span class="text-slate-300">—</span>
+                                            {% endif %}
+                                        </td>
+
+                                        {% for value in row.cells %}
+                                        <td class="p-3 min-w-[180px] border-r border-slate-100 whitespace-nowrap {% if value == 'NULL' %}text-slate-400 italic{% endif %}">
+                                            <div class="inline-flex items-center gap-2 max-w-full">
+                                                <span class="cell-value" title="{{ value }}">{{ value }}</span>
+                                                <button type="button" class="copy-btn copy-cell text-[10px] text-slate-400 hover:text-slate-900 border border-slate-200 rounded px-1">copy</button>
+                                            </div>
+                                        </td>
+                                        {% endfor %}
+
+                                        <td class="p-3 whitespace-nowrap font-sans">
+                                            {% if has_primary_key and row.has_pk_values %}
+                                            <form method="get" action="{{ url_for('edit_row', db_name=current_db, table_name=current_table) }}" class="inline">
+                                                {% for pk in row.pk_items %}
+                                                <input type="hidden" name="pk_{{ pk.name }}" value="{{ pk.value }}">
+                                                {% endfor %}
+                                                <input type="hidden" name="return_page" value="{{ page }}">
+                                                <input type="hidden" name="return_limit" value="{{ limit }}">
+                                                <input type="hidden" name="return_tables_q" value="{{ tables_q }}">
+                                                <input type="hidden" name="return_query" value="{{ current_query }}">
+                                                <button type="submit" class="p-1.5 px-2.5 bg-blue-50 text-blue-700 text-xs font-bold rounded-lg hover:bg-blue-100">Редактировать</button>
+                                            </form>
+                                            <button type="button" class="inline-toggle p-1.5 px-2.5 border border-indigo-200 text-indigo-700 text-xs font-bold rounded-lg hover:bg-indigo-50" data-inline-target="inline-row-{{ row_index }}">Inline</button>
+                                            <form method="post" action="{{ url_for('delete_row', db_name=current_db, table_name=current_table) }}" class="inline" data-confirm="Удалить эту строку?" data-loading-form>
+                                                {% for pk in row.pk_items %}
+                                                <input type="hidden" name="pk_{{ pk.name }}" value="{{ pk.value }}">
+                                                {% endfor %}
+                                                <input type="hidden" name="return_page" value="{{ page }}">
+                                                <input type="hidden" name="return_limit" value="{{ limit }}">
+                                                <input type="hidden" name="return_tables_q" value="{{ tables_q }}">
+                                                <input type="hidden" name="return_query" value="{{ current_query }}">
+                                                <button type="submit" data-loading-text="Удаление..." class="p-1.5 px-2.5 bg-rose-50 text-rose-700 text-xs font-bold rounded-lg hover:bg-rose-100">Удалить</button>
+                                            </form>
+                                            {% else %}
+                                            <span class="text-xs text-slate-400">Нет PK</span>
+                                            {% endif %}
+                                        </td>
+                                    </tr>
+                                    <tr id="inline-row-{{ row_index }}" class="hidden border-b border-slate-100 bg-slate-50/80">
+                                        <td colspan="{{ (columns|length) + 2 if columns else 3 }}" class="p-3">
+                                            {% if has_primary_key and row.has_pk_values and inline_edit_columns %}
+                                            <form method="post" action="{{ url_for('inline_update_row', db_name=current_db, table_name=current_table) }}" class="space-y-3" data-loading-form>
+                                                {% for pk in row.pk_items %}
+                                                <input type="hidden" name="pk_{{ pk.name }}" value="{{ pk.value }}">
+                                                {% endfor %}
+                                                <input type="hidden" name="return_page" value="{{ page }}">
+                                                <input type="hidden" name="return_limit" value="{{ limit }}">
+                                                <input type="hidden" name="return_tables_q" value="{{ tables_q }}">
+                                                <input type="hidden" name="return_query" value="{{ current_query }}">
+
+                                                <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+                                                    {% for column in inline_edit_columns %}
+                                                    {% set input_type = column_input_type(column) %}
+                                                    {% set field_id = 'inline-field-' ~ row_index ~ '-' ~ column.name %}
+                                                    <div class="space-y-1 p-2 bg-white border border-slate-200 rounded">
+                                                        <label class="block text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                                                            {{ column.name }}
+                                                            <span class="normal-case text-slate-400 font-medium tracking-normal">({{ column.column_type }})</span>
+                                                        </label>
+
+                                                        {% if input_type == 'textarea' %}
+                                                        <textarea id="{{ field_id }}" name="inline_{{ column.name }}" rows="2" class="mono w-full px-2 py-1 border border-slate-300 rounded">{{ row.inline_values.get(column.name, '') }}</textarea>
+                                                        {% elif input_type == 'select' or input_type == 'boolean' %}
+                                                        <select id="{{ field_id }}" name="inline_{{ column.name }}" class="mono w-full px-2 py-1 border border-slate-300 rounded bg-white">
+                                                            {% if column.is_nullable %}
+                                                            <option value="" {% if row.inline_nulls.get(column.name) %}selected{% endif %}>NULL</option>
+                                                            {% endif %}
+                                                            {% for value, label in column_select_options(column) %}
+                                                            <option value="{{ value }}" {% if row.inline_values.get(column.name, '') == value %}selected{% endif %}>{{ label }}</option>
+                                                            {% endfor %}
+                                                        </select>
+                                                        {% else %}
+                                                        <input
+                                                            id="{{ field_id }}"
+                                                            type="{{ input_type }}"
+                                                            name="inline_{{ column.name }}"
+                                                            value="{{ row.inline_values.get(column.name, '') }}"
+                                                            {% if input_type == 'number' %}step="{{ column_number_step(column) }}"{% endif %}
+                                                            class="mono w-full px-2 py-1 border border-slate-300 rounded"
+                                                        >
+                                                        {% endif %}
+
+                                                        {% if column.is_nullable %}
+                                                        <label class="inline-flex items-center gap-1 text-[11px] text-slate-500">
+                                                            <input type="checkbox" name="inline_set_null_{{ column.name }}" value="1" class="inline-set-null" data-inline-input="{{ field_id }}" {% if row.inline_nulls.get(column.name) %}checked{% endif %}>
+                                                            SET NULL
+                                                        </label>
+                                                        {% endif %}
+                                                    </div>
+                                                    {% endfor %}
+                                                </div>
+
+                                                <div class="flex items-center justify-end gap-2">
+                                                    <button type="button" class="inline-cancel px-2.5 py-1 border border-slate-300 rounded text-xs hover:bg-slate-100" data-inline-target="inline-row-{{ row_index }}">Скрыть</button>
+                                                    <button type="submit" data-loading-text="Сохранение..." class="px-2.5 py-1 bg-slate-900 text-white rounded text-xs">Сохранить inline</button>
+                                                </div>
+                                            </form>
+                                            {% else %}
+                                            <div class="text-xs text-slate-500">Inline-редактирование недоступно для этой строки.</div>
+                                            {% endif %}
+                                        </td>
+                                    </tr>
+                                    {% else %}
+                                    <tr>
+                                        <td colspan="{{ (columns|length) + 2 if columns else 3 }}" class="p-8 text-center">
+                                            <div class="text-xs text-slate-500">В таблице пока нет строк.</div>
+                                        </td>
+                                    </tr>
                                     {% endfor %}
-                                    <th class="p-3 min-w-[220px] whitespace-nowrap">Действия</th>
-                                </tr>
-                            </thead>
-                            <tbody class="text-sm mono text-slate-700">
-                                {% for row in row_items %}
-                                <tr class="border-b border-slate-100 hover:bg-slate-50 group">
-                                    {% for value in row.cells %}
-                                    <td class="p-3 min-w-[180px] border-r border-slate-100 whitespace-nowrap {% if value == 'NULL' %}text-slate-400 italic{% endif %}">{{ value }}</td>
-                                    {% endfor %}
-                                    <td class="p-3 whitespace-nowrap font-sans">
-                                        {% if has_primary_key and row.has_pk_values %}
-                                        <form method="get" action="{{ url_for('edit_row', db_name=current_db, table_name=current_table) }}" class="inline">
-                                            {% for pk in row.pk_items %}
-                                            <input type="hidden" name="pk_{{ pk.name }}" value="{{ pk.value }}">
-                                            {% endfor %}
-                                            <input type="hidden" name="return_page" value="{{ page }}">
-                                            <input type="hidden" name="return_limit" value="{{ limit }}">
-                                            <input type="hidden" name="return_tables_q" value="{{ tables_q }}">
-                                            <button type="submit" class="p-1.5 px-2.5 bg-blue-50 text-blue-700 text-xs font-bold rounded-lg hover:bg-blue-100">Редактировать</button>
-                                        </form>
-                                        <form method="post" action="{{ url_for('delete_row', db_name=current_db, table_name=current_table) }}" class="inline" data-confirm="Удалить эту строку?" data-loading-form>
-                                            {% for pk in row.pk_items %}
-                                            <input type="hidden" name="pk_{{ pk.name }}" value="{{ pk.value }}">
-                                            {% endfor %}
-                                            <input type="hidden" name="return_page" value="{{ page }}">
-                                            <input type="hidden" name="return_limit" value="{{ limit }}">
-                                            <input type="hidden" name="return_tables_q" value="{{ tables_q }}">
-                                            <button type="submit" data-loading-text="Удаление..." class="p-1.5 px-2.5 bg-rose-50 text-rose-700 text-xs font-bold rounded-lg hover:bg-rose-100">Удалить</button>
-                                        </form>
-                                        {% else %}
-                                        <span class="text-xs text-slate-400">Нет PK</span>
-                                        {% endif %}
-                                    </td>
-                                </tr>
-                                {% else %}
-                                <tr>
-                                    <td colspan="{{ (columns|length) + 1 if columns else 2 }}" class="p-8 text-center">
-                                        <div class="text-xs text-slate-500">В таблице пока нет строк.</div>
-                                    </td>
-                                </tr>
-                                {% endfor %}
-                            </tbody>
+                                </tbody>
                         </table>
                     </div>
                 </div>
@@ -150,19 +332,30 @@
                 <div class="mt-4 flex flex-wrap justify-between gap-4 items-center text-xs text-slate-500">
                     <div>
                         Строки {{ rows_from }}-{{ rows_to }} (страница {{ page }}). Оценка строк в таблице: {{ estimated_rows }}.
-                        {% if not has_primary_key %}<span class="text-rose-500">Для Edit/Delete нужен PRIMARY KEY.</span>{% endif %}
+                        {% if not has_primary_key %}<span class="text-rose-500">Для Edit/Delete/Inline/Bulk нужен PRIMARY KEY.</span>{% endif %}
                     </div>
-                    <div class="flex gap-2 items-center">
-                        <a href="{{ url_for('table_view', db_name=current_db, table_name=current_table, limit=50, page=1, tables_q=tables_q) }}" class="px-2 py-1 border border-slate-200 rounded hover:bg-white shadow-sm">50</a>
-                        <a href="{{ url_for('table_view', db_name=current_db, table_name=current_table, limit=100, page=1, tables_q=tables_q) }}" class="px-2 py-1 border border-slate-200 rounded hover:bg-white shadow-sm">100</a>
-                        <a href="{{ url_for('table_view', db_name=current_db, table_name=current_table, limit=500, page=1, tables_q=tables_q) }}" class="px-2 py-1 border border-slate-200 rounded hover:bg-white shadow-sm">500</a>
+                    <div class="flex gap-2 items-center flex-wrap">
+                        <a href="{{ url_for('table_view', db_name=current_db, table_name=current_table) }}?{{ limit_50_query }}" class="px-2 py-1 border border-slate-200 rounded hover:bg-white shadow-sm">50</a>
+                        <a href="{{ url_for('table_view', db_name=current_db, table_name=current_table) }}?{{ limit_100_query }}" class="px-2 py-1 border border-slate-200 rounded hover:bg-white shadow-sm">100</a>
+                        <a href="{{ url_for('table_view', db_name=current_db, table_name=current_table) }}?{{ limit_500_query }}" class="px-2 py-1 border border-slate-200 rounded hover:bg-white shadow-sm">500</a>
+
                         {% if has_prev_page %}
-                        <a href="{{ url_for('table_view', db_name=current_db, table_name=current_table, limit=limit, page=prev_page, tables_q=tables_q) }}" class="px-2 py-1 border border-slate-200 rounded hover:bg-white shadow-sm">← Пред.</a>
+                        <a href="{{ url_for('table_view', db_name=current_db, table_name=current_table) }}?{{ prev_page_query }}" class="px-2 py-1 border border-slate-200 rounded hover:bg-white shadow-sm">← Пред.</a>
                         {% endif %}
+
                         <span class="px-2 py-1 border border-slate-300 rounded bg-white shadow-sm text-slate-900 font-bold">{{ page }}</span>
+
                         {% if has_next_page %}
-                        <a href="{{ url_for('table_view', db_name=current_db, table_name=current_table, limit=limit, page=next_page, tables_q=tables_q) }}" class="px-2 py-1 border border-slate-200 rounded hover:bg-white shadow-sm">След. →</a>
+                        <a href="{{ url_for('table_view', db_name=current_db, table_name=current_table) }}?{{ next_page_query }}" class="px-2 py-1 border border-slate-200 rounded hover:bg-white shadow-sm">След. →</a>
                         {% endif %}
+
+                        <form method="get" action="{{ url_for('table_view', db_name=current_db, table_name=current_table) }}" class="inline-flex items-center gap-1">
+                            {% for key, value in query_args_without_page %}
+                            <input type="hidden" name="{{ key }}" value="{{ value }}">
+                            {% endfor %}
+                            <input type="number" min="1" name="page" value="{{ page }}" class="mono w-16 px-2 py-1 border border-slate-300 rounded bg-white">
+                            <button type="submit" class="px-2 py-1 border border-slate-300 rounded hover:bg-white">Go</button>
+                        </form>
                     </div>
                 </div>
             </div>
@@ -198,6 +391,196 @@
                 submitButton.disabled = true;
                 submitButton.classList.add('opacity-70', 'cursor-not-allowed');
             });
+        });
+
+        const toggleAllRows = document.getElementById('toggle-all-rows');
+        const rowSelectors = Array.from(document.querySelectorAll('.row-selector'));
+        const selectedCounter = document.getElementById('selected-counter');
+
+        const updateSelectedCounter = () => {
+            const selectedCount = rowSelectors.filter((item) => item.checked).length;
+            if (selectedCounter) {
+                selectedCounter.textContent = `Выбрано: ${selectedCount}`;
+            }
+        };
+
+        if (toggleAllRows) {
+            toggleAllRows.addEventListener('change', () => {
+                rowSelectors.forEach((checkbox) => {
+                    checkbox.checked = toggleAllRows.checked;
+                });
+                updateSelectedCounter();
+            });
+        }
+
+        rowSelectors.forEach((checkbox) => {
+            checkbox.addEventListener('change', () => {
+                const checkedCount = rowSelectors.filter((item) => item.checked).length;
+                if (toggleAllRows) {
+                    toggleAllRows.checked = rowSelectors.length > 0 && checkedCount === rowSelectors.length;
+                }
+                updateSelectedCounter();
+            });
+        });
+        updateSelectedCounter();
+
+        const bulkAction = document.getElementById('bulk-action');
+        const bulkUpdateFields = document.getElementById('bulk-update-fields');
+        const bulkForm = document.getElementById('bulk-form');
+
+        const syncBulkFields = () => {
+            if (!bulkAction || !bulkUpdateFields) {
+                return;
+            }
+            bulkUpdateFields.classList.toggle('hidden', bulkAction.value !== 'update');
+        };
+
+        if (bulkAction) {
+            bulkAction.addEventListener('change', syncBulkFields);
+            syncBulkFields();
+        }
+
+        if (bulkForm) {
+            bulkForm.addEventListener('submit', (event) => {
+                const selectedCount = rowSelectors.filter((item) => item.checked).length;
+                if (selectedCount < 1) {
+                    event.preventDefault();
+                    window.alert('Сначала выбери хотя бы одну строку.');
+                    return;
+                }
+                if (bulkAction && bulkAction.value === 'delete') {
+                    if (!window.confirm(`Удалить выбранные строки (${selectedCount})?`)) {
+                        event.preventDefault();
+                    }
+                }
+            });
+        }
+
+        const applyFilterRowVisibility = (rowElement) => {
+            const opSelect = rowElement.querySelector('.filter-op');
+            const valueWrap = rowElement.querySelector('.filter-value-wrap');
+            const valueToWrap = rowElement.querySelector('.filter-value-to-wrap');
+            if (!opSelect || !valueWrap || !valueToWrap) {
+                return;
+            }
+            const op = opSelect.value;
+            const noValue = op === 'is_null' || op === 'not_null';
+            const between = op === 'between';
+            valueWrap.classList.toggle('hidden', noValue);
+            valueToWrap.classList.toggle('hidden', !between);
+        };
+
+        const bindFilterRow = (rowElement) => {
+            const opSelect = rowElement.querySelector('.filter-op');
+            const removeButton = rowElement.querySelector('.remove-filter-row');
+            if (opSelect) {
+                opSelect.addEventListener('change', () => applyFilterRowVisibility(rowElement));
+            }
+            if (removeButton) {
+                removeButton.addEventListener('click', () => {
+                    const allRows = document.querySelectorAll('.filter-row');
+                    if (allRows.length <= 1) {
+                        const colInput = rowElement.querySelector('.filter-column');
+                        const valInput = rowElement.querySelector('.filter-value');
+                        const valToInput = rowElement.querySelector('.filter-value-to');
+                        const opInput = rowElement.querySelector('.filter-op');
+                        if (colInput) colInput.value = '';
+                        if (valInput) valInput.value = '';
+                        if (valToInput) valToInput.value = '';
+                        if (opInput) opInput.value = 'contains';
+                        applyFilterRowVisibility(rowElement);
+                        return;
+                    }
+                    rowElement.remove();
+                });
+            }
+            applyFilterRowVisibility(rowElement);
+        };
+
+        document.querySelectorAll('.filter-row').forEach(bindFilterRow);
+
+        const addFilterRowButton = document.getElementById('add-filter-row');
+        if (addFilterRowButton) {
+            addFilterRowButton.addEventListener('click', () => {
+                const rowsContainer = document.getElementById('filter-rows');
+                const firstRow = rowsContainer ? rowsContainer.querySelector('.filter-row') : null;
+                if (!rowsContainer || !firstRow) {
+                    return;
+                }
+                const cloned = firstRow.cloneNode(true);
+                const colInput = cloned.querySelector('.filter-column');
+                const opInput = cloned.querySelector('.filter-op');
+                const valInput = cloned.querySelector('.filter-value');
+                const valToInput = cloned.querySelector('.filter-value-to');
+                if (colInput) colInput.value = '';
+                if (opInput) opInput.value = 'contains';
+                if (valInput) valInput.value = '';
+                if (valToInput) valToInput.value = '';
+                rowsContainer.appendChild(cloned);
+                bindFilterRow(cloned);
+            });
+        }
+
+        document.querySelectorAll('.copy-cell').forEach((button) => {
+            button.addEventListener('click', async () => {
+                const cell = button.closest('td');
+                const valueNode = cell ? cell.querySelector('.cell-value') : null;
+                const value = valueNode ? valueNode.textContent || '' : '';
+                if (!value) {
+                    return;
+                }
+                try {
+                    await navigator.clipboard.writeText(value);
+                    button.textContent = 'copied';
+                    setTimeout(() => {
+                        button.textContent = 'copy';
+                    }, 800);
+                } catch (error) {
+                    window.alert('Не удалось скопировать в буфер обмена.');
+                }
+            });
+        });
+
+        const inlineRows = Array.from(document.querySelectorAll('tr[id^="inline-row-"]'));
+        document.querySelectorAll('.inline-toggle').forEach((button) => {
+            button.addEventListener('click', () => {
+                const targetId = button.getAttribute('data-inline-target') || '';
+                const targetRow = document.getElementById(targetId);
+                if (!targetRow) {
+                    return;
+                }
+                const willOpen = targetRow.classList.contains('hidden');
+                inlineRows.forEach((row) => {
+                    if (row.id !== targetId) {
+                        row.classList.add('hidden');
+                    }
+                });
+                targetRow.classList.toggle('hidden', !willOpen);
+            });
+        });
+
+        document.querySelectorAll('.inline-cancel').forEach((button) => {
+            button.addEventListener('click', () => {
+                const targetId = button.getAttribute('data-inline-target') || '';
+                const targetRow = document.getElementById(targetId);
+                if (!targetRow) {
+                    return;
+                }
+                targetRow.classList.add('hidden');
+            });
+        });
+
+        document.querySelectorAll('.inline-set-null').forEach((checkbox) => {
+            const inputId = checkbox.getAttribute('data-inline-input') || '';
+            const targetInput = document.getElementById(inputId);
+            const sync = () => {
+                if (!targetInput) {
+                    return;
+                }
+                targetInput.disabled = checkbox.checked;
+            };
+            checkbox.addEventListener('change', sync);
+            sync();
         });
     </script>
 

@@ -17,16 +17,16 @@
 
 ## 1) NOW (critical stability and usability)
 
-- [ ] Fix all remaining navigation edge cases between tables/databases
-- [ ] Finalize horizontal scroll behavior on all data grids
-- [ ] Add global error page templates (`404`, `500`, DB connection errors)
-- [ ] Improve form validation messages (per-field, human readable)
-- [ ] Add safe handling for long-running queries (timeout + cancel option in UI)
-- [ ] Preserve filter/sort/pagination state when navigating back
-- [ ] Add optimistic flash messages for all actions (create/edit/delete/sql)
-- [ ] Add confirmation dialogs for destructive operations everywhere
-- [ ] Make empty states consistent for all pages
-- [ ] Add loading states for SQL execution and table operations
+- [x] Fix all remaining navigation edge cases between tables/databases
+- [x] Finalize horizontal scroll behavior on all data grids
+- [x] Add global error page templates (`404`, `500`, DB connection errors)
+- [x] Improve form validation messages (per-field, human readable)
+- [x] Add safe handling for long-running queries (timeout + cancel option in UI)
+- [x] Preserve filter/sort/pagination state when navigating back
+- [x] Add optimistic flash messages for all actions (create/edit/delete/sql)
+- [x] Add confirmation dialogs for destructive operations everywhere
+- [x] Make empty states consistent for all pages
+- [x] Add loading states for SQL execution and table operations
 
 ---
 
@@ -34,34 +34,34 @@
 
 ### 2.1 Database and table management
 
-- [ ] Create table from UI
-- [ ] Rename database
-- [ ] Drop database (with strong confirmation)
-- [ ] Rename table
-- [ ] Truncate table
-- [ ] Drop table
-- [ ] Duplicate table (structure only / structure + data)
+- [x] Create table from UI
+- [x] Rename database
+- [x] Drop database (with strong confirmation)
+- [x] Rename table
+- [x] Truncate table
+- [x] Drop table
+- [x] Duplicate table (structure only / structure + data)
 
 ### 2.2 Structure editor
 
-- [ ] Show table columns, types, nullability, default, extra
-- [ ] Add column
-- [ ] Edit column
-- [ ] Delete column
-- [ ] Reorder columns
-- [ ] Manage indexes (`PRIMARY`, `UNIQUE`, `INDEX`, `FULLTEXT`)
-- [ ] Manage foreign keys
+- [x] Show table columns, types, nullability, default, extra
+- [x] Add column
+- [x] Edit column
+- [x] Delete column
+- [x] Reorder columns
+- [x] Manage indexes (`PRIMARY`, `UNIQUE`, `INDEX`, `FULLTEXT`)
+- [x] Manage foreign keys
 
 ### 2.3 Data browsing
 
-- [ ] Column sorting from UI
-- [ ] Per-column filtering (exact, contains, ranges)
-- [ ] Advanced search builder (`AND/OR`)
-- [ ] Inline row edit in grid
-- [ ] Bulk select + bulk delete/update/export
-- [ ] Jump to page and page-size presets
-- [ ] Copy cell value quickly
-- [ ] NULL-aware filtering and display options
+- [x] Column sorting from UI
+- [x] Per-column filtering (exact, contains, ranges)
+- [x] Advanced search builder (`AND/OR`)
+- [x] Inline row edit in grid
+- [x] Bulk select + bulk delete/update/export
+- [x] Jump to page and page-size presets
+- [x] Copy cell value quickly
+- [x] NULL-aware filtering and display options
 
 ### 2.4 SQL console v2
 
@@ -206,4 +206,3 @@
 - [ ] Data diff tool between two tables/databases
 - [ ] Migration generator from schema changes
 - [ ] Plugin system for custom tools
-

@@ -71,6 +71,7 @@
                     </div>
                 </div>
                 <div class="flex items-center gap-3">
+                    <a href="{{ url_for('create_table', db_name=current_db, q=filter_query) }}" class="text-xs text-emerald-600 font-medium hover:underline">+ Новая таблица</a>
                     <a href="{{ url_for('create_database') }}" class="text-xs text-indigo-600 font-medium hover:underline">+ Новая база</a>
                     <form method="post" action="{{ url_for('logout') }}" onsubmit="return confirm('Выйти из текущей сессии?');">
                         <button class="text-xs text-slate-400 hover:text-slate-900">Выход</button>
@@ -149,6 +150,11 @@
                                     <td class="p-3 border-r border-slate-100 text-slate-600">{{ '%.2f'|format(table.size_mb) }} MB</td>
                                     <td class="p-3 font-sans whitespace-nowrap">
                                         <a href="{{ url_for('table_view', db_name=current_db, table_name=table.name, tables_q=filter_query) }}" class="p-1.5 px-2.5 bg-green-50 text-green-700 text-xs font-bold rounded-lg hover:bg-green-100"><i class="ri-eye-line mr-1"></i> Обзор</a>
+                                        <a href="{{ url_for('table_structure', db_name=current_db, table_name=table.name, tables_q=filter_query) }}" class="p-1.5 px-2.5 border border-slate-200 text-slate-600 text-xs font-bold rounded-lg hover:border-slate-400">Structure</a>
+                                        <button type="button" data-action="rename-table" data-table-name="{{ table.name }}" data-url="{{ url_for('rename_table', db_name=current_db, table_name=table.name) }}" class="p-1.5 px-2.5 border border-slate-200 text-slate-600 text-xs font-bold rounded-lg hover:border-blue-400 hover:text-blue-700">Rename</button>
+                                        <button type="button" data-action="duplicate-table" data-table-name="{{ table.name }}" data-url="{{ url_for('duplicate_table', db_name=current_db, table_name=table.name) }}" class="p-1.5 px-2.5 border border-slate-200 text-slate-600 text-xs font-bold rounded-lg hover:border-amber-400 hover:text-amber-700">Duplicate</button>
+                                        <button type="button" data-action="truncate-table" data-table-name="{{ table.name }}" data-url="{{ url_for('truncate_table', db_name=current_db, table_name=table.name) }}" class="p-1.5 px-2.5 border border-slate-200 text-slate-600 text-xs font-bold rounded-lg hover:border-orange-400 hover:text-orange-700">Truncate</button>
+                                        <button type="button" data-action="drop-table" data-table-name="{{ table.name }}" data-url="{{ url_for('drop_table', db_name=current_db, table_name=table.name) }}" class="p-1.5 px-2.5 border border-slate-200 text-slate-600 text-xs font-bold rounded-lg hover:border-rose-400 hover:text-rose-700">Drop</button>
                                     </td>
                                 </tr>
                                 {% else %}
@@ -162,6 +168,23 @@
                 </div>
             </div>
 
+            <form id="rename-table-form" method="post" class="hidden">
+                <input type="hidden" name="new_table_name" value="">
+                <input type="hidden" name="q" value="{{ filter_query }}">
+            </form>
+            <form id="duplicate-table-form" method="post" class="hidden">
+                <input type="hidden" name="new_table_name" value="">
+                <input type="hidden" name="duplicate_mode" value="">
+                <input type="hidden" name="q" value="{{ filter_query }}">
+            </form>
+            <form id="truncate-table-form" method="post" class="hidden">
+                <input type="hidden" name="q" value="{{ filter_query }}">
+            </form>
+            <form id="drop-table-form" method="post" class="hidden">
+                <input type="hidden" name="confirm_name" value="">
+                <input type="hidden" name="q" value="{{ filter_query }}">
+            </form>
+
             <footer class="h-8 bg-slate-900 text-[10px] text-slate-400 px-6 flex items-center justify-between uppercase tracking-widest z-20">
                 <div class="flex gap-4">
                     <span>Connected: {{ mysql_host }}</span>
@@ -171,6 +194,70 @@
             </footer>
         </main>
     </div>
+
+    <script>
+        const renameTableForm = document.getElementById('rename-table-form');
+        const duplicateTableForm = document.getElementById('duplicate-table-form');
+        const truncateTableForm = document.getElementById('truncate-table-form');
+        const dropTableForm = document.getElementById('drop-table-form');
+
+        document.querySelectorAll('[data-action="rename-table"]').forEach((button) => {
+            button.addEventListener('click', () => {
+                const tableName = button.getAttribute('data-table-name') || '';
+                const actionUrl = button.getAttribute('data-url') || '';
+                const nextName = window.prompt(`Новое имя для таблицы "${tableName}":`, tableName);
+                if (!nextName || !renameTableForm || !actionUrl) {
+                    return;
+                }
+                renameTableForm.action = actionUrl;
+                renameTableForm.querySelector('input[name="new_table_name"]').value = nextName.trim();
+                renameTableForm.submit();
+            });
+        });
+
+        document.querySelectorAll('[data-action="duplicate-table"]').forEach((button) => {
+            button.addEventListener('click', () => {
+                const tableName = button.getAttribute('data-table-name') || '';
+                const actionUrl = button.getAttribute('data-url') || '';
+                const nextName = window.prompt(`Имя копии для таблицы "${tableName}":`, `${tableName}_copy`);
+                if (!nextName || !duplicateTableForm || !actionUrl) {
+                    return;
+                }
+                const copyData = window.confirm('Копировать данные тоже? OK = структура + данные, Cancel = только структура');
+                duplicateTableForm.action = actionUrl;
+                duplicateTableForm.querySelector('input[name="new_table_name"]').value = nextName.trim();
+                duplicateTableForm.querySelector('input[name="duplicate_mode"]').value = copyData ? 'structure_and_data' : 'structure_only';
+                duplicateTableForm.submit();
+            });
+        });
+
+        document.querySelectorAll('[data-action="truncate-table"]').forEach((button) => {
+            button.addEventListener('click', () => {
+                const tableName = button.getAttribute('data-table-name') || '';
+                const actionUrl = button.getAttribute('data-url') || '';
+                const allowed = window.confirm(`Очистить таблицу "${tableName}"? Все строки будут удалены.`);
+                if (!allowed || !truncateTableForm || !actionUrl) {
+                    return;
+                }
+                truncateTableForm.action = actionUrl;
+                truncateTableForm.submit();
+            });
+        });
+
+        document.querySelectorAll('[data-action="drop-table"]').forEach((button) => {
+            button.addEventListener('click', () => {
+                const tableName = button.getAttribute('data-table-name') || '';
+                const actionUrl = button.getAttribute('data-url') || '';
+                const confirmValue = window.prompt(`Удаление таблицы необратимо. Введи имя таблицы "${tableName}" для подтверждения.`);
+                if (!confirmValue || !dropTableForm || !actionUrl) {
+                    return;
+                }
+                dropTableForm.action = actionUrl;
+                dropTableForm.querySelector('input[name="confirm_name"]').value = confirmValue.trim();
+                dropTableForm.submit();
+            });
+        });
+    </script>
 
 </body>
 </html>

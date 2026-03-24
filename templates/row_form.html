@@ -21,7 +21,7 @@
                 <span class="text-[10px] bg-slate-200 px-1.5 py-0.5 rounded font-mono">{{ mysql_port }}</span>
             </div>
             <div class="p-3 space-y-2">
-                <a href="{{ url_for('table_view', db_name=current_db, table_name=current_table, page=return_page, limit=return_limit, tables_q=return_tables_q) }}" class="w-full inline-flex justify-center bg-white border border-slate-300 rounded px-3 py-1.5 text-xs hover:border-slate-900 transition-colors">К таблице</a>
+                <a href="{% if return_query %}{{ url_for('table_view', db_name=current_db, table_name=current_table) }}?{{ return_query }}{% else %}{{ url_for('table_view', db_name=current_db, table_name=current_table, page=return_page, limit=return_limit, tables_q=return_tables_q) }}{% endif %}" class="w-full inline-flex justify-center bg-white border border-slate-300 rounded px-3 py-1.5 text-xs hover:border-slate-900 transition-colors">К таблице</a>
                 <a href="{{ url_for('sql_console', db_name=current_db, table=current_table, return_page=return_page, return_limit=return_limit, tables_q=return_tables_q) }}" class="w-full inline-flex justify-center bg-white border border-slate-300 rounded px-3 py-1.5 text-xs hover:border-slate-900 transition-colors">SQL Console</a>
             </div>
             <nav class="flex-1 overflow-y-auto text-sm px-2">
@@ -83,6 +83,7 @@
                     <input type="hidden" name="return_page" value="{{ return_page }}">
                     <input type="hidden" name="return_limit" value="{{ return_limit }}">
                     <input type="hidden" name="return_tables_q" value="{{ return_tables_q }}">
+                    <input type="hidden" name="return_query" value="{{ return_query }}">
 
                     <div class="mb-5">
                         <h1 class="text-xl font-bold tracking-tight text-slate-900">
@@ -131,7 +132,7 @@
                     </div>
 
                     <div class="mt-6 flex items-center justify-between">
-                        <a href="{{ url_for('table_view', db_name=current_db, table_name=current_table, page=return_page, limit=return_limit, tables_q=return_tables_q) }}" class="px-4 py-2 text-sm text-slate-500 hover:text-slate-900">Отмена</a>
+                        <a href="{% if return_query %}{{ url_for('table_view', db_name=current_db, table_name=current_table) }}?{{ return_query }}{% else %}{{ url_for('table_view', db_name=current_db, table_name=current_table, page=return_page, limit=return_limit, tables_q=return_tables_q) }}{% endif %}" class="px-4 py-2 text-sm text-slate-500 hover:text-slate-900">Отмена</a>
                         <button type="submit" data-loading-text="{% if mode == 'create' %}Добавление...{% else %}Сохранение...{% endif %}" class="px-5 py-2 bg-slate-950 text-white rounded-lg text-sm font-semibold hover:bg-slate-800">
                             {% if mode == 'create' %}Добавить строку{% else %}Сохранить изменения{% endif %}
                         </button>

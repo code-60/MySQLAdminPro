@@ -4,16 +4,20 @@ import os
 import re
 import socket
 import webbrowser
+import csv
+import io
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from time import perf_counter
 from typing import Any
+from urllib.parse import parse_qsl, urlencode
 
 import pymysql
 from dotenv import load_dotenv
-from flask import Flask, abort, flash, redirect, render_template, request, session, url_for
+from flask import Flask, abort, flash, make_response, redirect, render_template, request, session, url_for
 from werkzeug.exceptions import HTTPException
 
 
@@ -24,6 +28,21 @@ MAX_IDENTIFIER_LENGTH = 128
 DEFAULT_SQL_TIMEOUT_MS = 30000
 MIN_SQL_TIMEOUT_MS = 1000
 MAX_SQL_TIMEOUT_MS = 300000
+CREATE_TABLE_ALLOWED_TYPES = {
+    "INT",
+    "BIGINT",
+    "TINYINT",
+    "TINYINT(1)",
+    "DECIMAL(10,2)",
+    "VARCHAR(255)",
+    "TEXT",
+    "LONGTEXT",
+    "DATE",
+    "DATETIME",
+    "TIMESTAMP",
+    "JSON",
+}
+FK_RULES = {"RESTRICT", "CASCADE", "SET NULL", "NO ACTION"}
 
 NUMERIC_DATA_TYPES = {
     "tinyint",
@@ -42,6 +61,7 @@ TEXTAREA_DATA_TYPES = {"text", "tinytext", "mediumtext", "longtext", "json"}
 DATETIME_DATA_TYPES = {"datetime", "timestamp"}
 DATE_DATA_TYPES = {"date"}
 TIME_DATA_TYPES = {"time"}
+SIMPLE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
 
 @dataclass
@@ -102,6 +122,128 @@ def safe_database_name(name: str) -> bool:
     if "\x00" in name or "/" in name:
         return False
     return True
+
+
+def is_system_database_name(name: str) -> bool:
+    return name in SYSTEM_DATABASES
+
+
+def safe_simple_identifier(name: str) -> bool:
+    return safe_database_name(name) and bool(SIMPLE_IDENTIFIER_RE.fullmatch(name))
+
+
+def normalize_create_table_columns(
+    form_data: Any,
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    names = [item.strip() for item in form_data.getlist("column_name")]
+    types = [item.strip().upper() for item in form_data.getlist("column_type")]
+    nullable_values = [item.strip() for item in form_data.getlist("column_nullable")]
+    primary_values = [item.strip() for item in form_data.getlist("column_primary")]
+
+    max_len = max(len(names), len(types), len(nullable_values), len(primary_values), 0)
+    columns: list[dict[str, Any]] = []
+    field_errors: dict[str, str] = {}
+    used_names: set[str] = set()
+    primary_count = 0
+
+    for index in range(max_len):
+        name = names[index] if index < len(names) else ""
+        column_type = types[index] if index < len(types) else ""
+        nullable_raw = nullable_values[index] if index < len(nullable_values) else "0"
+        primary_raw = primary_values[index] if index < len(primary_values) else "0"
+        nullable = nullable_raw == "1"
+        is_primary = primary_raw == "1"
+
+        if not name and not column_type:
+            continue
+
+        if not safe_simple_identifier(name):
+            field_errors[f"column_name_{index}"] = "Некорректное имя колонки."
+
+        normalized_key = name.lower()
+        if normalized_key in used_names:
+            field_errors[f"column_name_{index}"] = "Имена колонок должны быть уникальными."
+        if normalized_key:
+            used_names.add(normalized_key)
+
+        if column_type not in CREATE_TABLE_ALLOWED_TYPES:
+            field_errors[f"column_type_{index}"] = "Недопустимый тип колонки."
+
+        if is_primary:
+            primary_count += 1
+            nullable = False
+
+        columns.append(
+            {
+                "name": name,
+                "column_type": column_type,
+                "nullable": nullable,
+                "is_primary": is_primary,
+            }
+        )
+
+    if not columns:
+        field_errors["columns"] = "Добавь хотя бы одну колонку."
+
+    if primary_count > 0 and primary_count != 1:
+        field_errors["primary"] = "Пока поддерживается только один PRIMARY KEY."
+
+    return columns, field_errors
+
+
+def build_column_definition_sql(
+    *,
+    column_type: str,
+    nullable: bool,
+    default_mode: str,
+    default_value: str,
+) -> tuple[str, list[Any], dict[str, str]]:
+    errors: dict[str, str] = {}
+    params: list[Any] = []
+    sql_fragment = f"{column_type} {'NULL' if nullable else 'NOT NULL'}"
+
+    if default_mode not in {"none", "null", "value"}:
+        errors["default"] = "Некорректный режим DEFAULT."
+        return sql_fragment, params, errors
+
+    if default_mode == "null":
+        if not nullable:
+            errors["default"] = "DEFAULT NULL возможен только для nullable колонки."
+            return sql_fragment, params, errors
+        sql_fragment += " DEFAULT NULL"
+    elif default_mode == "value":
+        sql_fragment += " DEFAULT %s"
+        params.append(default_value)
+
+    return sql_fragment, params, errors
+
+
+def build_existing_column_definition_sql(
+    column: ColumnMeta,
+) -> tuple[str, list[Any], str | None]:
+    extra_upper = column.extra.upper()
+    if (
+        "GENERATED" in extra_upper
+        or "ON UPDATE" in extra_upper
+        or "AUTO_INCREMENT" in extra_upper
+    ):
+        return "", [], "Эта колонка имеет сложное определение и пока не поддерживает reorder."
+
+    sql_fragment = (
+        f"{column.column_type} {'NULL' if column.is_nullable else 'NOT NULL'}"
+    )
+    params: list[Any] = []
+    if column.default is None:
+        if column.is_nullable:
+            sql_fragment += " DEFAULT NULL"
+    else:
+        default_text = str(column.default).upper()
+        if "CURRENT_TIMESTAMP" in default_text:
+            return "", [], "Колонка с DEFAULT CURRENT_TIMESTAMP пока не поддерживает reorder."
+        sql_fragment += " DEFAULT %s"
+        params.append(column.default)
+
+    return sql_fragment, params, None
 
 
 def is_boolean_column(column: ColumnMeta) -> bool:
@@ -320,6 +462,99 @@ def fetch_columns_meta(
     ]
 
 
+def fetch_table_indexes(
+    conn: pymysql.Connection, db_name: str, table_name: str
+) -> list[dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                s.index_name AS index_name,
+                s.non_unique AS non_unique,
+                s.index_type AS index_type,
+                s.seq_in_index AS seq_in_index,
+                s.column_name AS column_name
+            FROM information_schema.statistics s
+            WHERE s.table_schema = %s AND s.table_name = %s
+            ORDER BY s.index_name, s.seq_in_index
+            """,
+            (db_name, table_name),
+        )
+        rows = cur.fetchall()
+
+    grouped: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        name = str(row["index_name"])
+        item = grouped.setdefault(
+            name,
+            {
+                "name": name,
+                "index_type": str(row.get("index_type") or "BTREE"),
+                "is_unique": int(row.get("non_unique") or 0) == 0,
+                "is_primary": name == "PRIMARY",
+                "columns": [],
+            },
+        )
+        item["columns"].append(str(row["column_name"]))
+
+    items = list(grouped.values())
+    items.sort(key=lambda i: (not i["is_primary"], i["name"].lower()))
+    return items
+
+
+def fetch_table_foreign_keys(
+    conn: pymysql.Connection, db_name: str, table_name: str
+) -> list[dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                k.constraint_name AS constraint_name,
+                k.column_name AS column_name,
+                k.referenced_table_schema AS referenced_table_schema,
+                k.referenced_table_name AS referenced_table_name,
+                k.referenced_column_name AS referenced_column_name,
+                k.ordinal_position AS ordinal_position,
+                r.update_rule AS update_rule,
+                r.delete_rule AS delete_rule
+            FROM information_schema.key_column_usage k
+            JOIN information_schema.referential_constraints r
+              ON r.constraint_schema = k.constraint_schema
+             AND r.constraint_name = k.constraint_name
+             AND r.table_name = k.table_name
+            WHERE
+                k.table_schema = %s
+                AND k.table_name = %s
+                AND k.referenced_table_name IS NOT NULL
+            ORDER BY k.constraint_name, k.ordinal_position
+            """,
+            (db_name, table_name),
+        )
+        rows = cur.fetchall()
+
+    grouped: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        name = str(row["constraint_name"])
+        item = grouped.setdefault(
+            name,
+            {
+                "name": name,
+                "referenced_table_schema": str(row["referenced_table_schema"]),
+                "referenced_table_name": str(row["referenced_table_name"]),
+                "update_rule": str(row.get("update_rule") or "RESTRICT"),
+                "delete_rule": str(row.get("delete_rule") or "RESTRICT"),
+                "columns": [],
+                "referenced_columns": [],
+            },
+        )
+        item["columns"].append(str(row["column_name"]))
+        item["referenced_columns"].append(str(row["referenced_column_name"]))
+
+    items = list(grouped.values())
+    items.sort(key=lambda i: i["name"].lower())
+    return items
+
+
 def fetch_primary_key_columns(
     conn: pymysql.Connection, db_name: str, table_name: str
 ) -> list[str]:
@@ -348,6 +583,26 @@ def format_form_value(value: Any) -> str:
     if isinstance(value, (datetime, date, time, Decimal)):
         return str(value)
     return str(value)
+
+
+def format_export_value(value: Any) -> str:
+    if value is None:
+        return "NULL"
+    if isinstance(value, bytes):
+        return value.hex()
+    if isinstance(value, (datetime, date, time, Decimal)):
+        return str(value)
+    return str(value)
+
+
+def json_export_value(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        return value.hex()
+    if isinstance(value, (datetime, date, time, Decimal)):
+        return str(value)
+    return value
 
 
 def format_input_value(column: ColumnMeta, value: Any) -> str:
@@ -493,6 +748,42 @@ def parse_table_return_state(source: Mapping[str, Any]) -> tuple[int, int, str]:
     return return_page, return_limit, return_tables_q
 
 
+def normalize_query_string(raw_query: str) -> str:
+    value = raw_query.strip().lstrip("?")
+    if not value:
+        return ""
+    try:
+        pairs = parse_qsl(value, keep_blank_values=True)
+    except ValueError:
+        return ""
+    return urlencode(pairs, doseq=True)
+
+
+def build_table_view_return_url(
+    *,
+    db_name: str,
+    table_name: str,
+    return_query: str,
+    return_page: int,
+    return_limit: int,
+    return_tables_q: str,
+) -> str:
+    normalized_query = normalize_query_string(return_query)
+    if normalized_query:
+        return (
+            f"{url_for('table_view', db_name=db_name, table_name=table_name)}"
+            f"?{normalized_query}"
+        )
+    return url_for(
+        "table_view",
+        db_name=db_name,
+        table_name=table_name,
+        page=return_page,
+        limit=return_limit,
+        tables_q=return_tables_q,
+    )
+
+
 def fetch_row_by_pk(
     conn: pymysql.Connection,
     db_name: str,
@@ -517,6 +808,18 @@ def database_exists(conn: pymysql.Connection, db_name: str) -> bool:
             (db_name,),
         )
         return cur.fetchone() is not None
+
+
+def fetch_database_collation(conn: pymysql.Connection, db_name: str) -> str | None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT default_collation_name AS collation FROM information_schema.schemata WHERE schema_name = %s",
+            (db_name,),
+        )
+        row = cur.fetchone()
+    if not row:
+        return None
+    return row.get("collation")
 
 
 def table_exists(conn: pymysql.Connection, db_name: str, table_name: str) -> bool:
@@ -763,6 +1066,373 @@ def create_database() -> Any:
         conn.close()
 
 
+@app.route("/databases/<db_name>/rename", methods=["POST"])
+def rename_database(db_name: str) -> Any:
+    if not is_authenticated():
+        return redirect(url_for("login"))
+    if not safe_database_name(db_name):
+        abort(404)
+
+    filter_query = request.form.get("q", "").strip()
+    new_name = request.form.get("new_name", "").strip()
+    confirm_name = request.form.get("confirm_name", "").strip()
+
+    if is_system_database_name(db_name):
+        flash("Системные базы переименовывать нельзя.", "error")
+        return redirect(url_for("databases", q=filter_query))
+    if confirm_name != db_name:
+        flash("Подтверждение не совпало с именем базы.", "error")
+        return redirect(url_for("databases", q=filter_query))
+    if not safe_simple_identifier(new_name):
+        flash("Новое имя базы должно содержать только латиницу, цифры и _.", "error")
+        return redirect(url_for("databases", q=filter_query))
+    if new_name == db_name:
+        flash("Новое имя совпадает с текущим.", "error")
+        return redirect(url_for("databases", q=filter_query))
+
+    try:
+        conn = mysql_connect()
+        try:
+            if not database_exists(conn, db_name):
+                flash(f"База '{db_name}' не найдена.", "error")
+                return redirect(url_for("databases", q=filter_query))
+            if database_exists(conn, new_name):
+                flash(f"База '{new_name}' уже существует.", "error")
+                return redirect(url_for("databases", q=filter_query))
+
+            collation = fetch_database_collation(conn, db_name) or "utf8mb4_unicode_ci"
+            tables = fetch_tables(conn, db_name)
+
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"CREATE DATABASE {quote_identifier(new_name)} COLLATE {collation}"
+                )
+                for table in tables:
+                    cur.execute(
+                        f"RENAME TABLE {quote_identifier(db_name)}.{quote_identifier(table.name)} "
+                        f"TO {quote_identifier(new_name)}.{quote_identifier(table.name)}"
+                    )
+                cur.execute(f"DROP DATABASE {quote_identifier(db_name)}")
+        finally:
+            conn.close()
+    except Exception as exc:  # pragma: no cover - runtime-specific
+        flash(
+            f"Не удалось переименовать базу: {exc}. Проверь состояние БД вручную.",
+            "error",
+        )
+        return redirect(url_for("databases", q=filter_query))
+
+    flash(f"База '{db_name}' переименована в '{new_name}'.", "success")
+    return redirect(url_for("database_tables", db_name=new_name))
+
+
+@app.route("/databases/<db_name>/drop", methods=["POST"])
+def drop_database(db_name: str) -> Any:
+    if not is_authenticated():
+        return redirect(url_for("login"))
+    if not safe_database_name(db_name):
+        abort(404)
+
+    filter_query = request.form.get("q", "").strip()
+    confirm_name = request.form.get("confirm_name", "").strip()
+
+    if is_system_database_name(db_name):
+        flash("Системные базы удалять нельзя.", "error")
+        return redirect(url_for("databases", q=filter_query))
+    if confirm_name != db_name:
+        flash("Подтверждение не совпало с именем базы.", "error")
+        return redirect(url_for("databases", q=filter_query))
+
+    try:
+        conn = mysql_connect()
+        try:
+            if not database_exists(conn, db_name):
+                flash(f"База '{db_name}' не найдена.", "error")
+                return redirect(url_for("databases", q=filter_query))
+            with conn.cursor() as cur:
+                cur.execute(f"DROP DATABASE {quote_identifier(db_name)}")
+        finally:
+            conn.close()
+    except Exception as exc:  # pragma: no cover - runtime-specific
+        flash(f"Не удалось удалить базу: {exc}", "error")
+        return redirect(url_for("databases", q=filter_query))
+
+    flash(f"База '{db_name}' удалена.", "success")
+    return redirect(url_for("databases", q=filter_query))
+
+
+@app.route("/databases/<db_name>/tables/new", methods=["GET", "POST"])
+def create_table(db_name: str) -> Any:
+    if not is_authenticated():
+        return redirect(url_for("login"))
+    if not safe_database_name(db_name):
+        abort(404)
+
+    table_name = request.form.get("table_name", "").strip() if request.method == "POST" else ""
+    table_filter = (request.form.get("q") if request.method == "POST" else request.args.get("q", "")) or ""
+    table_filter = table_filter.strip()
+    field_errors: dict[str, str] = {}
+    columns_data: list[dict[str, Any]] = []
+
+    try:
+        conn = mysql_connect()
+        try:
+            if not database_exists(conn, db_name):
+                abort(404)
+            db_items = fetch_databases(conn)
+            table_items = fetch_tables(conn, db_name)
+            total_rows = sum(t.rows_count for t in table_items)
+            total_size = round(sum(t.size_mb for t in table_items), 2)
+
+            if request.method == "POST":
+                columns_data, column_errors = normalize_create_table_columns(request.form)
+                field_errors.update(column_errors)
+
+                if not safe_simple_identifier(table_name):
+                    field_errors["table_name"] = "Имя таблицы: только латиница, цифры и _."
+                elif table_exists(conn, db_name, table_name):
+                    field_errors["table_name"] = "Таблица с таким именем уже существует."
+
+                if field_errors:
+                    flash("Исправь ошибки в форме.", "error")
+                else:
+                    definitions: list[str] = []
+                    for column in columns_data:
+                        fragment = (
+                            f"{quote_identifier(column['name'])} {column['column_type']}"
+                        )
+                        if not column["nullable"]:
+                            fragment += " NOT NULL"
+                        definitions.append(fragment)
+
+                    primary_columns = [
+                        quote_identifier(column["name"])
+                        for column in columns_data
+                        if column["is_primary"]
+                    ]
+                    if primary_columns:
+                        definitions.append(f"PRIMARY KEY ({', '.join(primary_columns)})")
+
+                    create_sql = (
+                        f"CREATE TABLE {quote_identifier(db_name)}.{quote_identifier(table_name)} "
+                        f"({', '.join(definitions)}) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+                    )
+                    with conn.cursor() as cur:
+                        cur.execute(create_sql)
+
+                    flash(f"Таблица '{table_name}' создана.", "success")
+                    return redirect(
+                        url_for(
+                            "table_view",
+                            db_name=db_name,
+                            table_name=table_name,
+                            tables_q=table_filter,
+                        )
+                    )
+            else:
+                columns_data = [
+                    {
+                        "name": "id",
+                        "column_type": "BIGINT",
+                        "nullable": False,
+                        "is_primary": True,
+                    },
+                    {
+                        "name": "created_at",
+                        "column_type": "DATETIME",
+                        "nullable": False,
+                        "is_primary": False,
+                    },
+                ]
+        finally:
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception as exc:  # pragma: no cover - runtime-specific
+        return render_error_page(
+            title="Ошибка создания таблицы",
+            message=str(exc),
+            status_code=500,
+            back_url=url_for("database_tables", db_name=db_name, q=table_filter),
+        )
+
+    return render_template(
+        "new_table.html",
+        databases=db_items if "db_items" in locals() else [],
+        current_db=db_name,
+        tables=table_items if "table_items" in locals() else [],
+        total_tables=len(table_items) if "table_items" in locals() else 0,
+        total_rows=total_rows if "total_rows" in locals() else 0,
+        total_size=total_size if "total_size" in locals() else 0.0,
+        table_name=table_name,
+        table_filter=table_filter,
+        columns_data=columns_data,
+        field_errors=field_errors,
+        allowed_column_types=sorted(CREATE_TABLE_ALLOWED_TYPES),
+    )
+
+
+@app.route("/databases/<db_name>/tables/<table_name>/rename", methods=["POST"])
+def rename_table(db_name: str, table_name: str) -> Any:
+    if not is_authenticated():
+        return redirect(url_for("login"))
+    if not safe_database_name(db_name) or not safe_database_name(table_name):
+        abort(404)
+
+    filter_query = request.form.get("q", "").strip()
+    new_table_name = request.form.get("new_table_name", "").strip()
+
+    if not safe_simple_identifier(new_table_name):
+        flash("Новое имя таблицы должно содержать только латиницу, цифры и _.", "error")
+        return redirect(url_for("database_tables", db_name=db_name, q=filter_query))
+    if new_table_name == table_name:
+        flash("Новое имя совпадает с текущим.", "error")
+        return redirect(url_for("database_tables", db_name=db_name, q=filter_query))
+
+    try:
+        conn = mysql_connect()
+        try:
+            if not table_exists(conn, db_name, table_name):
+                flash(f"Таблица '{table_name}' не найдена.", "error")
+                return redirect(url_for("database_tables", db_name=db_name, q=filter_query))
+            if table_exists(conn, db_name, new_table_name):
+                flash(f"Таблица '{new_table_name}' уже существует.", "error")
+                return redirect(url_for("database_tables", db_name=db_name, q=filter_query))
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"RENAME TABLE {quote_identifier(db_name)}.{quote_identifier(table_name)} "
+                    f"TO {quote_identifier(db_name)}.{quote_identifier(new_table_name)}"
+                )
+        finally:
+            conn.close()
+    except Exception as exc:  # pragma: no cover - runtime-specific
+        flash(f"Не удалось переименовать таблицу: {exc}", "error")
+        return redirect(url_for("database_tables", db_name=db_name, q=filter_query))
+
+    flash(f"Таблица '{table_name}' переименована в '{new_table_name}'.", "success")
+    return redirect(url_for("database_tables", db_name=db_name, q=filter_query))
+
+
+@app.route("/databases/<db_name>/tables/<table_name>/truncate", methods=["POST"])
+def truncate_table(db_name: str, table_name: str) -> Any:
+    if not is_authenticated():
+        return redirect(url_for("login"))
+    if not safe_database_name(db_name) or not safe_database_name(table_name):
+        abort(404)
+
+    filter_query = request.form.get("q", "").strip()
+    try:
+        conn = mysql_connect()
+        try:
+            if not table_exists(conn, db_name, table_name):
+                flash(f"Таблица '{table_name}' не найдена.", "error")
+                return redirect(url_for("database_tables", db_name=db_name, q=filter_query))
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"TRUNCATE TABLE {quote_identifier(db_name)}.{quote_identifier(table_name)}"
+                )
+        finally:
+            conn.close()
+    except Exception as exc:  # pragma: no cover - runtime-specific
+        flash(f"Не удалось очистить таблицу: {exc}", "error")
+        return redirect(url_for("database_tables", db_name=db_name, q=filter_query))
+
+    flash(f"Таблица '{table_name}' очищена.", "success")
+    return redirect(url_for("database_tables", db_name=db_name, q=filter_query))
+
+
+@app.route("/databases/<db_name>/tables/<table_name>/drop", methods=["POST"])
+def drop_table(db_name: str, table_name: str) -> Any:
+    if not is_authenticated():
+        return redirect(url_for("login"))
+    if not safe_database_name(db_name) or not safe_database_name(table_name):
+        abort(404)
+
+    filter_query = request.form.get("q", "").strip()
+    confirm_name = request.form.get("confirm_name", "").strip()
+    if confirm_name != table_name:
+        flash("Подтверждение удаления не совпало с именем таблицы.", "error")
+        return redirect(url_for("database_tables", db_name=db_name, q=filter_query))
+
+    try:
+        conn = mysql_connect()
+        try:
+            if not table_exists(conn, db_name, table_name):
+                flash(f"Таблица '{table_name}' не найдена.", "error")
+                return redirect(url_for("database_tables", db_name=db_name, q=filter_query))
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"DROP TABLE {quote_identifier(db_name)}.{quote_identifier(table_name)}"
+                )
+        finally:
+            conn.close()
+    except Exception as exc:  # pragma: no cover - runtime-specific
+        flash(f"Не удалось удалить таблицу: {exc}", "error")
+        return redirect(url_for("database_tables", db_name=db_name, q=filter_query))
+
+    flash(f"Таблица '{table_name}' удалена.", "success")
+    return redirect(url_for("database_tables", db_name=db_name, q=filter_query))
+
+
+@app.route("/databases/<db_name>/tables/<table_name>/duplicate", methods=["POST"])
+def duplicate_table(db_name: str, table_name: str) -> Any:
+    if not is_authenticated():
+        return redirect(url_for("login"))
+    if not safe_database_name(db_name) or not safe_database_name(table_name):
+        abort(404)
+
+    filter_query = request.form.get("q", "").strip()
+    new_table_name = request.form.get("new_table_name", "").strip()
+    duplicate_mode = request.form.get("duplicate_mode", "structure_only").strip()
+
+    if duplicate_mode not in {"structure_only", "structure_and_data"}:
+        flash("Некорректный режим дублирования.", "error")
+        return redirect(url_for("database_tables", db_name=db_name, q=filter_query))
+    if not safe_simple_identifier(new_table_name):
+        flash("Имя новой таблицы должно содержать только латиницу, цифры и _.", "error")
+        return redirect(url_for("database_tables", db_name=db_name, q=filter_query))
+    if new_table_name == table_name:
+        flash("Имя новой таблицы должно отличаться от исходной.", "error")
+        return redirect(url_for("database_tables", db_name=db_name, q=filter_query))
+
+    try:
+        conn = mysql_connect()
+        try:
+            if not table_exists(conn, db_name, table_name):
+                flash(f"Таблица '{table_name}' не найдена.", "error")
+                return redirect(url_for("database_tables", db_name=db_name, q=filter_query))
+            if table_exists(conn, db_name, new_table_name):
+                flash(f"Таблица '{new_table_name}' уже существует.", "error")
+                return redirect(url_for("database_tables", db_name=db_name, q=filter_query))
+
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"CREATE TABLE {quote_identifier(db_name)}.{quote_identifier(new_table_name)} "
+                    f"LIKE {quote_identifier(db_name)}.{quote_identifier(table_name)}"
+                )
+                inserted_rows = 0
+                if duplicate_mode == "structure_and_data":
+                    cur.execute(
+                        f"INSERT INTO {quote_identifier(db_name)}.{quote_identifier(new_table_name)} "
+                        f"SELECT * FROM {quote_identifier(db_name)}.{quote_identifier(table_name)}"
+                    )
+                    inserted_rows = max(cur.rowcount, 0)
+        finally:
+            conn.close()
+    except Exception as exc:  # pragma: no cover - runtime-specific
+        flash(f"Не удалось дублировать таблицу: {exc}", "error")
+        return redirect(url_for("database_tables", db_name=db_name, q=filter_query))
+
+    if duplicate_mode == "structure_and_data":
+        flash(
+            f"Таблица '{new_table_name}' создана (структура + данные, строк: {inserted_rows}).",
+            "success",
+        )
+    else:
+        flash(f"Таблица '{new_table_name}' создана (только структура).", "success")
+    return redirect(url_for("database_tables", db_name=db_name, q=filter_query))
+
+
 @app.route("/databases/<db_name>/tables")
 def database_tables(db_name: str) -> Any:
     if not is_authenticated():
@@ -974,6 +1644,39 @@ def table_view(db_name: str, table_name: str) -> Any:
     page = coerce_positive_int(page_raw, 1)
     offset = (page - 1) * limit
     tables_q = request.args.get("tables_q", "").strip()
+    sort_col = request.args.get("sort_col", "").strip()
+    sort_dir = request.args.get("sort_dir", "asc").strip().lower()
+    sort_dir = "desc" if sort_dir == "desc" else "asc"
+    filter_logic = request.args.get("filter_logic", "AND").strip().upper()
+    filter_logic = "OR" if filter_logic == "OR" else "AND"
+
+    filter_columns = request.args.getlist("filter_column")
+    filter_ops = request.args.getlist("filter_op")
+    filter_values = request.args.getlist("filter_value")
+    filter_values_to = request.args.getlist("filter_value_to")
+    max_filter_rows = max(
+        len(filter_columns), len(filter_ops), len(filter_values), len(filter_values_to), 1
+    )
+    filter_rows: list[dict[str, str]] = []
+    valid_filters: list[dict[str, str]] = []
+    filter_operators = {
+        "contains",
+        "exact",
+        "gt",
+        "lt",
+        "between",
+        "is_null",
+        "not_null",
+    }
+    filter_operator_items = [
+        ("contains", "Contains"),
+        ("exact", "Exact"),
+        ("gt", ">"),
+        ("lt", "<"),
+        ("between", "Between"),
+        ("is_null", "IS NULL"),
+        ("not_null", "IS NOT NULL"),
+    ]
 
     try:
         conn = mysql_connect()
@@ -998,15 +1701,103 @@ def table_view(db_name: str, table_name: str) -> Any:
                 )
                 if current_table_meta:
                     sidebar_tables = [current_table_meta, *sidebar_tables]
-            primary_key_columns = fetch_primary_key_columns(conn, db_name, table_name)
+
+            columns_meta = fetch_columns_meta(conn, db_name, table_name)
+            primary_key_columns = [column.name for column in columns_meta if column.is_primary]
+            column_names = [column.name for column in columns_meta]
+            column_name_set = set(column_names)
+            inline_edit_columns = [
+                column
+                for column in columns_meta
+                if (not column.is_primary and "GENERATED" not in column.extra.upper())
+            ]
+
+            if sort_col not in column_name_set:
+                sort_col = ""
+
+            for index in range(max_filter_rows):
+                row_col = filter_columns[index].strip() if index < len(filter_columns) else ""
+                row_op = filter_ops[index].strip() if index < len(filter_ops) else "contains"
+                row_val = filter_values[index].strip() if index < len(filter_values) else ""
+                row_val_to = (
+                    filter_values_to[index].strip()
+                    if index < len(filter_values_to)
+                    else ""
+                )
+                if row_op not in filter_operators:
+                    row_op = "contains"
+
+                filter_rows.append(
+                    {
+                        "column": row_col,
+                        "op": row_op,
+                        "value": row_val,
+                        "value_to": row_val_to,
+                    }
+                )
+
+                has_row_input = bool(row_col or row_val or row_val_to)
+                if not has_row_input:
+                    continue
+                if row_col not in column_name_set:
+                    continue
+                if row_op in {"is_null", "not_null"}:
+                    valid_filters.append(filter_rows[-1])
+                elif row_op == "between":
+                    if row_val and row_val_to:
+                        valid_filters.append(filter_rows[-1])
+                elif row_val:
+                    valid_filters.append(filter_rows[-1])
+
+            where_clauses: list[str] = []
+            where_params: list[Any] = []
+            for item in valid_filters:
+                col_sql = quote_identifier(item["column"])
+                op = item["op"]
+                val = item["value"]
+                val_to = item["value_to"]
+
+                if op == "contains":
+                    where_clauses.append(f"CAST({col_sql} AS CHAR) LIKE %s")
+                    where_params.append(f"%{val}%")
+                elif op == "exact":
+                    if val.upper() == "NULL":
+                        where_clauses.append(f"{col_sql} IS NULL")
+                    else:
+                        where_clauses.append(f"{col_sql} = %s")
+                        where_params.append(val)
+                elif op == "gt":
+                    where_clauses.append(f"{col_sql} > %s")
+                    where_params.append(val)
+                elif op == "lt":
+                    where_clauses.append(f"{col_sql} < %s")
+                    where_params.append(val)
+                elif op == "between":
+                    where_clauses.append(f"{col_sql} BETWEEN %s AND %s")
+                    where_params.extend([val, val_to])
+                elif op == "is_null":
+                    where_clauses.append(f"{col_sql} IS NULL")
+                elif op == "not_null":
+                    where_clauses.append(f"{col_sql} IS NOT NULL")
+
+            where_sql = ""
+            if where_clauses:
+                where_sql = f" WHERE {f' {filter_logic} '.join(where_clauses)}"
+
+            order_sql = ""
+            if sort_col:
+                order_sql = (
+                    f" ORDER BY {quote_identifier(sort_col)} "
+                    f"{'DESC' if sort_dir == 'desc' else 'ASC'}"
+                )
 
             start = perf_counter()
             with conn.cursor() as cur:
                 sql = (
-                    f"SELECT * FROM {quote_identifier(db_name)}."
-                    f"{quote_identifier(table_name)} LIMIT %s OFFSET %s"
+                    f"SELECT * FROM {quote_identifier(db_name)}.{quote_identifier(table_name)}"
+                    f"{where_sql}{order_sql} LIMIT %s OFFSET %s"
                 )
-                cur.execute(sql, (limit + 1, offset))
+                cur.execute(sql, [*where_params, limit + 1, offset])
                 fetched_rows = cur.fetchall()
                 query_ms = (perf_counter() - start) * 1000
                 columns: list[str] = (
@@ -1018,15 +1809,36 @@ def table_view(db_name: str, table_name: str) -> Any:
 
             row_items: list[dict[str, Any]] = []
             for raw_row in raw_rows:
+                pk_map = {
+                    column: format_form_value(raw_row.get(column))
+                    for column in primary_key_columns
+                }
+                inline_values = {
+                    column.name: format_input_value(column, raw_row.get(column.name))
+                    for column in inline_edit_columns
+                }
+                inline_nulls = {
+                    column.name: raw_row.get(column.name) is None
+                    for column in inline_edit_columns
+                }
+                has_pk_values = bool(primary_key_columns) and all(
+                    raw_row.get(column) is not None for column in primary_key_columns
+                )
                 row_items.append(
                     {
                         "cells": [format_cell(raw_row.get(column)) for column in columns],
                         "pk_items": [
-                            {"name": column, "value": format_form_value(raw_row.get(column))}
+                            {"name": column, "value": pk_map[column]}
                             for column in primary_key_columns
                         ],
-                        "has_pk_values": bool(primary_key_columns)
-                        and all(raw_row.get(column) is not None for column in primary_key_columns),
+                        "pk_token": (
+                            json.dumps(pk_map, separators=(",", ":"), ensure_ascii=False)
+                            if has_pk_values
+                            else ""
+                        ),
+                        "inline_values": inline_values,
+                        "inline_nulls": inline_nulls,
+                        "has_pk_values": has_pk_values,
                     }
                 )
 
@@ -1036,6 +1848,64 @@ def table_view(db_name: str, table_name: str) -> Any:
             )
             rows_from = offset + 1 if raw_rows else 0
             rows_to = offset + len(raw_rows)
+
+            query_args_multi = {key: request.args.getlist(key) for key in request.args.keys()}
+
+            def build_query(overrides: dict[str, Any]) -> str:
+                params = {key: list(values) for key, values in query_args_multi.items()}
+                for key, value in overrides.items():
+                    if value is None:
+                        params.pop(key, None)
+                    else:
+                        params[key] = [str(value)]
+                return urlencode(params, doseq=True)
+
+            prev_page_query = build_query({"page": max(page - 1, 1)})
+            next_page_query = build_query({"page": page + 1})
+            limit_50_query = build_query({"limit": 50, "page": 1})
+            limit_100_query = build_query({"limit": 100, "page": 1})
+            limit_500_query = build_query({"limit": 500, "page": 1})
+            current_query = normalize_query_string(build_query({}))
+
+            sort_queries: dict[str, str] = {}
+            for column in columns:
+                next_dir = (
+                    "desc"
+                    if sort_col == column and sort_dir == "asc"
+                    else "asc"
+                )
+                sort_queries[column] = build_query(
+                    {
+                        "sort_col": column,
+                        "sort_dir": next_dir,
+                        "page": 1,
+                    }
+                )
+            clear_sort_query = build_query(
+                {
+                    "sort_col": None,
+                    "sort_dir": None,
+                    "page": 1,
+                }
+            )
+
+            query_args_without_page: list[tuple[str, str]] = []
+            for key, values in query_args_multi.items():
+                if key == "page":
+                    continue
+                for value in values:
+                    query_args_without_page.append((key, value))
+
+            bulk_update_columns = [
+                column for column in columns_meta if "GENERATED" not in column.extra.upper()
+            ]
+
+            query_preview = (
+                f"SELECT * FROM `{table_name}`"
+                f"{' WHERE ...' if where_clauses else ''}"
+                f"{f' ORDER BY `{sort_col}` {sort_dir.upper()}' if sort_col else ''} "
+                f"LIMIT {limit} OFFSET {offset};"
+            )
         finally:
             conn.close()
     except HTTPException:
@@ -1070,6 +1940,875 @@ def table_view(db_name: str, table_name: str) -> Any:
         query_ms=round(query_ms, 2),
         estimated_rows=estimated_rows,
         has_primary_key=bool(primary_key_columns),
+        sort_col=sort_col,
+        sort_dir=sort_dir,
+        sort_queries=sort_queries,
+        clear_sort_query=clear_sort_query,
+        filter_logic=filter_logic,
+        filter_rows=filter_rows,
+        column_names=column_names,
+        filter_operator_items=filter_operator_items,
+        prev_page_query=prev_page_query,
+        next_page_query=next_page_query,
+        limit_50_query=limit_50_query,
+        limit_100_query=limit_100_query,
+        limit_500_query=limit_500_query,
+        current_query=current_query,
+        query_args_without_page=query_args_without_page,
+        bulk_update_columns=bulk_update_columns,
+        inline_edit_columns=inline_edit_columns,
+        query_preview=query_preview,
+    )
+
+
+@app.route("/databases/<db_name>/tables/<table_name>/structure")
+def table_structure(db_name: str, table_name: str) -> Any:
+    if not is_authenticated():
+        return redirect(url_for("login"))
+
+    if not safe_database_name(db_name) or not safe_database_name(table_name):
+        abort(404)
+
+    tables_q = request.args.get("tables_q", "").strip()
+    try:
+        conn = mysql_connect()
+        try:
+            if not table_exists(conn, db_name, table_name):
+                flash(f"Таблица '{table_name}' не найдена.", "error")
+                return redirect(url_for("database_tables", db_name=db_name, q=tables_q))
+
+            db_items = fetch_databases(conn)
+            table_items = fetch_tables(conn, db_name)
+            columns_meta = fetch_columns_meta(conn, db_name, table_name)
+            table_indexes = fetch_table_indexes(conn, db_name, table_name)
+            foreign_keys = fetch_table_foreign_keys(conn, db_name, table_name)
+        finally:
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception as exc:  # pragma: no cover - runtime-specific
+        return render_error_page(
+            title="Ошибка чтения структуры таблицы",
+            message=str(exc),
+            status_code=500,
+            back_url=url_for("table_view", db_name=db_name, table_name=table_name, tables_q=tables_q),
+        )
+
+    return render_template(
+        "table_structure.html",
+        databases=db_items,
+        tables=table_items,
+        current_db=db_name,
+        current_table=table_name,
+        columns_meta=columns_meta,
+        table_indexes=table_indexes,
+        foreign_keys=foreign_keys,
+        table_names=[table.name for table in table_items],
+        tables_q=tables_q,
+        allowed_column_types=sorted(CREATE_TABLE_ALLOWED_TYPES),
+    )
+
+
+@app.route(
+    "/databases/<db_name>/tables/<table_name>/structure/columns/<column_name>/move",
+    methods=["POST"],
+)
+def move_column(db_name: str, table_name: str, column_name: str) -> Any:
+    if not is_authenticated():
+        return redirect(url_for("login"))
+
+    if not safe_database_name(db_name) or not safe_database_name(table_name):
+        abort(404)
+
+    tables_q = request.form.get("tables_q", "").strip()
+    direction = request.form.get("direction", "").strip().lower()
+    if direction not in {"up", "down"}:
+        flash("Некорректное направление перемещения.", "error")
+        return redirect(
+            url_for(
+                "table_structure",
+                db_name=db_name,
+                table_name=table_name,
+                tables_q=tables_q,
+            )
+        )
+
+    try:
+        conn = mysql_connect()
+        try:
+            if not table_exists(conn, db_name, table_name):
+                abort(404)
+
+            columns_meta = fetch_columns_meta(conn, db_name, table_name)
+            names = [column.name for column in columns_meta]
+            if column_name not in names:
+                flash("Колонка для перемещения не найдена.", "error")
+                return redirect(
+                    url_for(
+                        "table_structure",
+                        db_name=db_name,
+                        table_name=table_name,
+                        tables_q=tables_q,
+                    )
+                )
+
+            index = names.index(column_name)
+            if direction == "up" and index == 0:
+                flash("Колонка уже находится на первом месте.", "error")
+                return redirect(
+                    url_for(
+                        "table_structure",
+                        db_name=db_name,
+                        table_name=table_name,
+                        tables_q=tables_q,
+                    )
+                )
+            if direction == "down" and index == len(names) - 1:
+                flash("Колонка уже находится на последнем месте.", "error")
+                return redirect(
+                    url_for(
+                        "table_structure",
+                        db_name=db_name,
+                        table_name=table_name,
+                        tables_q=tables_q,
+                    )
+                )
+
+            column_meta = next(column for column in columns_meta if column.name == column_name)
+            definition_sql, params, definition_error = build_existing_column_definition_sql(
+                column_meta
+            )
+            if definition_error:
+                flash(definition_error, "error")
+                return redirect(
+                    url_for(
+                        "table_structure",
+                        db_name=db_name,
+                        table_name=table_name,
+                        tables_q=tables_q,
+                    )
+                )
+
+            if direction == "up":
+                if index == 1:
+                    position_sql = " FIRST"
+                else:
+                    position_sql = f" AFTER {quote_identifier(names[index - 2])}"
+            else:
+                position_sql = f" AFTER {quote_identifier(names[index + 1])}"
+
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"ALTER TABLE {quote_identifier(db_name)}.{quote_identifier(table_name)} "
+                    f"MODIFY COLUMN {quote_identifier(column_name)} {definition_sql}{position_sql}",
+                    params,
+                )
+        finally:
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception as exc:  # pragma: no cover - runtime-specific
+        flash(f"Не удалось изменить порядок колонок: {exc}", "error")
+        return redirect(
+            url_for(
+                "table_structure",
+                db_name=db_name,
+                table_name=table_name,
+                tables_q=tables_q,
+            )
+        )
+
+    flash(f"Порядок колонки '{column_name}' обновлен.", "success")
+    return redirect(
+        url_for(
+            "table_structure",
+            db_name=db_name,
+            table_name=table_name,
+            tables_q=tables_q,
+        )
+    )
+
+
+@app.route(
+    "/databases/<db_name>/tables/<table_name>/structure/columns/add",
+    methods=["POST"],
+)
+def add_column(db_name: str, table_name: str) -> Any:
+    if not is_authenticated():
+        return redirect(url_for("login"))
+
+    if not safe_database_name(db_name) or not safe_database_name(table_name):
+        abort(404)
+
+    tables_q = request.form.get("tables_q", "").strip()
+    column_name = request.form.get("column_name", "").strip()
+    column_type = request.form.get("column_type", "").strip().upper()
+    column_nullable = request.form.get("column_nullable", "0").strip() == "1"
+    default_mode = request.form.get("default_mode", "none").strip()
+    default_value = request.form.get("default_value", "")
+    column_after = request.form.get("column_after", "").strip()
+
+    if not safe_simple_identifier(column_name):
+        flash("Некорректное имя новой колонки.", "error")
+        return redirect(
+            url_for(
+                "table_structure",
+                db_name=db_name,
+                table_name=table_name,
+                tables_q=tables_q,
+            )
+        )
+    if column_type not in CREATE_TABLE_ALLOWED_TYPES:
+        flash("Недопустимый тип колонки.", "error")
+        return redirect(
+            url_for(
+                "table_structure",
+                db_name=db_name,
+                table_name=table_name,
+                tables_q=tables_q,
+            )
+        )
+
+    definition_sql, definition_params, definition_errors = build_column_definition_sql(
+        column_type=column_type,
+        nullable=column_nullable,
+        default_mode=default_mode,
+        default_value=default_value,
+    )
+    if definition_errors:
+        flash(definition_errors["default"], "error")
+        return redirect(
+            url_for(
+                "table_structure",
+                db_name=db_name,
+                table_name=table_name,
+                tables_q=tables_q,
+            )
+        )
+
+    try:
+        conn = mysql_connect()
+        try:
+            if not table_exists(conn, db_name, table_name):
+                abort(404)
+
+            columns_meta = fetch_columns_meta(conn, db_name, table_name)
+            existing_names = {column.name for column in columns_meta}
+
+            if column_name in existing_names:
+                flash("Колонка с таким именем уже существует.", "error")
+                return redirect(
+                    url_for(
+                        "table_structure",
+                        db_name=db_name,
+                        table_name=table_name,
+                        tables_q=tables_q,
+                    )
+                )
+
+            position_sql = ""
+            if column_after:
+                if column_after not in existing_names:
+                    flash("Колонка AFTER не найдена.", "error")
+                    return redirect(
+                        url_for(
+                            "table_structure",
+                            db_name=db_name,
+                            table_name=table_name,
+                            tables_q=tables_q,
+                        )
+                    )
+                position_sql = f" AFTER {quote_identifier(column_after)}"
+
+            sql = (
+                f"ALTER TABLE {quote_identifier(db_name)}.{quote_identifier(table_name)} "
+                f"ADD COLUMN {quote_identifier(column_name)} {definition_sql}{position_sql}"
+            )
+            with conn.cursor() as cur:
+                cur.execute(sql, definition_params)
+        finally:
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception as exc:  # pragma: no cover - runtime-specific
+        flash(f"Не удалось добавить колонку: {exc}", "error")
+        return redirect(
+            url_for(
+                "table_structure",
+                db_name=db_name,
+                table_name=table_name,
+                tables_q=tables_q,
+            )
+        )
+
+    flash(f"Колонка '{column_name}' добавлена.", "success")
+    return redirect(
+        url_for(
+            "table_structure",
+            db_name=db_name,
+            table_name=table_name,
+            tables_q=tables_q,
+        )
+    )
+
+
+@app.route(
+    "/databases/<db_name>/tables/<table_name>/structure/indexes/add",
+    methods=["POST"],
+)
+def add_index(db_name: str, table_name: str) -> Any:
+    if not is_authenticated():
+        return redirect(url_for("login"))
+
+    if not safe_database_name(db_name) or not safe_database_name(table_name):
+        abort(404)
+
+    tables_q = request.form.get("tables_q", "").strip()
+    index_kind = request.form.get("index_kind", "index").strip().lower()
+    index_name = request.form.get("index_name", "").strip()
+    columns_raw = request.form.get("index_columns", "").strip()
+    index_columns = [item.strip() for item in columns_raw.split(",") if item.strip()]
+
+    if index_kind not in {"primary", "unique", "index", "fulltext"}:
+        flash("Некорректный тип индекса.", "error")
+        return redirect(
+            url_for("table_structure", db_name=db_name, table_name=table_name, tables_q=tables_q)
+        )
+    if not index_columns:
+        flash("Укажи хотя бы одну колонку для индекса.", "error")
+        return redirect(
+            url_for("table_structure", db_name=db_name, table_name=table_name, tables_q=tables_q)
+        )
+    for column in index_columns:
+        if not safe_simple_identifier(column):
+            flash("Некорректное имя колонки в индексе.", "error")
+            return redirect(
+                url_for("table_structure", db_name=db_name, table_name=table_name, tables_q=tables_q)
+            )
+
+    try:
+        conn = mysql_connect()
+        try:
+            if not table_exists(conn, db_name, table_name):
+                abort(404)
+
+            columns_meta = fetch_columns_meta(conn, db_name, table_name)
+            existing_columns = {column.name for column in columns_meta}
+            if any(column not in existing_columns for column in index_columns):
+                flash("Одна или несколько колонок для индекса не найдены.", "error")
+                return redirect(
+                    url_for("table_structure", db_name=db_name, table_name=table_name, tables_q=tables_q)
+                )
+
+            existing_indexes = fetch_table_indexes(conn, db_name, table_name)
+            existing_index_names = {item["name"] for item in existing_indexes}
+
+            columns_sql = ", ".join(quote_identifier(column) for column in index_columns)
+            with conn.cursor() as cur:
+                if index_kind == "primary":
+                    if "PRIMARY" in existing_index_names:
+                        flash("PRIMARY KEY уже существует.", "error")
+                        return redirect(
+                            url_for("table_structure", db_name=db_name, table_name=table_name, tables_q=tables_q)
+                        )
+                    cur.execute(
+                        f"ALTER TABLE {quote_identifier(db_name)}.{quote_identifier(table_name)} "
+                        f"ADD PRIMARY KEY ({columns_sql})"
+                    )
+                    created_name = "PRIMARY"
+                else:
+                    if not index_name:
+                        index_name = f"idx_{'_'.join(index_columns)}"
+                    if not safe_simple_identifier(index_name):
+                        flash("Некорректное имя индекса.", "error")
+                        return redirect(
+                            url_for("table_structure", db_name=db_name, table_name=table_name, tables_q=tables_q)
+                        )
+                    if index_name in existing_index_names:
+                        flash("Индекс с таким именем уже существует.", "error")
+                        return redirect(
+                            url_for("table_structure", db_name=db_name, table_name=table_name, tables_q=tables_q)
+                        )
+
+                    if index_kind == "unique":
+                        statement = "ADD UNIQUE INDEX"
+                    elif index_kind == "fulltext":
+                        statement = "ADD FULLTEXT INDEX"
+                    else:
+                        statement = "ADD INDEX"
+                    cur.execute(
+                        f"ALTER TABLE {quote_identifier(db_name)}.{quote_identifier(table_name)} "
+                        f"{statement} {quote_identifier(index_name)} ({columns_sql})"
+                    )
+                    created_name = index_name
+        finally:
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception as exc:  # pragma: no cover - runtime-specific
+        flash(f"Не удалось создать индекс: {exc}", "error")
+        return redirect(
+            url_for("table_structure", db_name=db_name, table_name=table_name, tables_q=tables_q)
+        )
+
+    flash(f"Индекс '{created_name}' создан.", "success")
+    return redirect(
+        url_for("table_structure", db_name=db_name, table_name=table_name, tables_q=tables_q)
+    )
+
+
+@app.route(
+    "/databases/<db_name>/tables/<table_name>/structure/indexes/<index_name>/delete",
+    methods=["POST"],
+)
+def delete_index(db_name: str, table_name: str, index_name: str) -> Any:
+    if not is_authenticated():
+        return redirect(url_for("login"))
+
+    if not safe_database_name(db_name) or not safe_database_name(table_name):
+        abort(404)
+
+    tables_q = request.form.get("tables_q", "").strip()
+    confirm_name = request.form.get("confirm_name", "").strip()
+    if confirm_name != index_name:
+        flash("Подтверждение удаления индекса не совпало.", "error")
+        return redirect(
+            url_for("table_structure", db_name=db_name, table_name=table_name, tables_q=tables_q)
+        )
+
+    if index_name != "PRIMARY" and not safe_simple_identifier(index_name):
+        flash("Некорректное имя индекса.", "error")
+        return redirect(
+            url_for("table_structure", db_name=db_name, table_name=table_name, tables_q=tables_q)
+        )
+
+    try:
+        conn = mysql_connect()
+        try:
+            if not table_exists(conn, db_name, table_name):
+                abort(404)
+
+            existing_indexes = fetch_table_indexes(conn, db_name, table_name)
+            existing_names = {item["name"] for item in existing_indexes}
+            if index_name not in existing_names:
+                flash("Индекс не найден.", "error")
+                return redirect(
+                    url_for("table_structure", db_name=db_name, table_name=table_name, tables_q=tables_q)
+                )
+
+            with conn.cursor() as cur:
+                if index_name == "PRIMARY":
+                    cur.execute(
+                        f"ALTER TABLE {quote_identifier(db_name)}.{quote_identifier(table_name)} "
+                        "DROP PRIMARY KEY"
+                    )
+                else:
+                    cur.execute(
+                        f"ALTER TABLE {quote_identifier(db_name)}.{quote_identifier(table_name)} "
+                        f"DROP INDEX {quote_identifier(index_name)}"
+                    )
+        finally:
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception as exc:  # pragma: no cover - runtime-specific
+        flash(f"Не удалось удалить индекс: {exc}", "error")
+        return redirect(
+            url_for("table_structure", db_name=db_name, table_name=table_name, tables_q=tables_q)
+        )
+
+    flash(f"Индекс '{index_name}' удален.", "success")
+    return redirect(
+        url_for("table_structure", db_name=db_name, table_name=table_name, tables_q=tables_q)
+    )
+
+
+@app.route(
+    "/databases/<db_name>/tables/<table_name>/structure/foreign-keys/add",
+    methods=["POST"],
+)
+def add_foreign_key(db_name: str, table_name: str) -> Any:
+    if not is_authenticated():
+        return redirect(url_for("login"))
+
+    if not safe_database_name(db_name) or not safe_database_name(table_name):
+        abort(404)
+
+    tables_q = request.form.get("tables_q", "").strip()
+    fk_name = request.form.get("fk_name", "").strip()
+    column_name = request.form.get("column_name", "").strip()
+    referenced_table = request.form.get("referenced_table", "").strip()
+    referenced_column = request.form.get("referenced_column", "").strip()
+    on_update = request.form.get("on_update", "RESTRICT").strip().upper()
+    on_delete = request.form.get("on_delete", "RESTRICT").strip().upper()
+
+    if not fk_name:
+        fk_name = f"fk_{table_name}_{column_name}"
+    if not all(
+        safe_simple_identifier(value)
+        for value in (fk_name, column_name, referenced_table, referenced_column)
+    ):
+        flash("Некорректные параметры FOREIGN KEY.", "error")
+        return redirect(
+            url_for("table_structure", db_name=db_name, table_name=table_name, tables_q=tables_q)
+        )
+    if on_update not in FK_RULES or on_delete not in FK_RULES:
+        flash("Некорректные правила ON UPDATE/ON DELETE.", "error")
+        return redirect(
+            url_for("table_structure", db_name=db_name, table_name=table_name, tables_q=tables_q)
+        )
+
+    try:
+        conn = mysql_connect()
+        try:
+            if not table_exists(conn, db_name, table_name):
+                abort(404)
+            if not table_exists(conn, db_name, referenced_table):
+                flash("Таблица-назначение для FOREIGN KEY не найдена.", "error")
+                return redirect(
+                    url_for("table_structure", db_name=db_name, table_name=table_name, tables_q=tables_q)
+                )
+
+            local_columns = fetch_columns_meta(conn, db_name, table_name)
+            referenced_columns = fetch_columns_meta(conn, db_name, referenced_table)
+            local_names = {column.name for column in local_columns}
+            referenced_names = {column.name for column in referenced_columns}
+
+            if column_name not in local_names or referenced_column not in referenced_names:
+                flash("Колонки для FOREIGN KEY не найдены.", "error")
+                return redirect(
+                    url_for("table_structure", db_name=db_name, table_name=table_name, tables_q=tables_q)
+                )
+
+            if on_delete == "SET NULL":
+                local_column_meta = next(column for column in local_columns if column.name == column_name)
+                if not local_column_meta.is_nullable:
+                    flash("ON DELETE SET NULL требует nullable колонку.", "error")
+                    return redirect(
+                        url_for("table_structure", db_name=db_name, table_name=table_name, tables_q=tables_q)
+                    )
+
+            existing_fk = fetch_table_foreign_keys(conn, db_name, table_name)
+            if fk_name in {item["name"] for item in existing_fk}:
+                flash("FOREIGN KEY с таким именем уже существует.", "error")
+                return redirect(
+                    url_for("table_structure", db_name=db_name, table_name=table_name, tables_q=tables_q)
+                )
+
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"ALTER TABLE {quote_identifier(db_name)}.{quote_identifier(table_name)} "
+                    f"ADD CONSTRAINT {quote_identifier(fk_name)} "
+                    f"FOREIGN KEY ({quote_identifier(column_name)}) "
+                    f"REFERENCES {quote_identifier(db_name)}.{quote_identifier(referenced_table)} "
+                    f"({quote_identifier(referenced_column)}) "
+                    f"ON UPDATE {on_update} ON DELETE {on_delete}"
+                )
+        finally:
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception as exc:  # pragma: no cover - runtime-specific
+        flash(f"Не удалось создать FOREIGN KEY: {exc}", "error")
+        return redirect(
+            url_for("table_structure", db_name=db_name, table_name=table_name, tables_q=tables_q)
+        )
+
+    flash(f"FOREIGN KEY '{fk_name}' создан.", "success")
+    return redirect(
+        url_for("table_structure", db_name=db_name, table_name=table_name, tables_q=tables_q)
+    )
+
+
+@app.route(
+    "/databases/<db_name>/tables/<table_name>/structure/foreign-keys/<fk_name>/delete",
+    methods=["POST"],
+)
+def delete_foreign_key(db_name: str, table_name: str, fk_name: str) -> Any:
+    if not is_authenticated():
+        return redirect(url_for("login"))
+
+    if not safe_database_name(db_name) or not safe_database_name(table_name):
+        abort(404)
+    if not safe_simple_identifier(fk_name):
+        flash("Некорректное имя FOREIGN KEY.", "error")
+        return redirect(url_for("table_structure", db_name=db_name, table_name=table_name))
+
+    tables_q = request.form.get("tables_q", "").strip()
+    confirm_name = request.form.get("confirm_name", "").strip()
+    if confirm_name != fk_name:
+        flash("Подтверждение удаления FOREIGN KEY не совпало.", "error")
+        return redirect(
+            url_for("table_structure", db_name=db_name, table_name=table_name, tables_q=tables_q)
+        )
+
+    try:
+        conn = mysql_connect()
+        try:
+            if not table_exists(conn, db_name, table_name):
+                abort(404)
+
+            existing_fk = fetch_table_foreign_keys(conn, db_name, table_name)
+            if fk_name not in {item["name"] for item in existing_fk}:
+                flash("FOREIGN KEY не найден.", "error")
+                return redirect(
+                    url_for("table_structure", db_name=db_name, table_name=table_name, tables_q=tables_q)
+                )
+
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"ALTER TABLE {quote_identifier(db_name)}.{quote_identifier(table_name)} "
+                    f"DROP FOREIGN KEY {quote_identifier(fk_name)}"
+                )
+        finally:
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception as exc:  # pragma: no cover - runtime-specific
+        flash(f"Не удалось удалить FOREIGN KEY: {exc}", "error")
+        return redirect(
+            url_for("table_structure", db_name=db_name, table_name=table_name, tables_q=tables_q)
+        )
+
+    flash(f"FOREIGN KEY '{fk_name}' удален.", "success")
+    return redirect(
+        url_for("table_structure", db_name=db_name, table_name=table_name, tables_q=tables_q)
+    )
+
+
+@app.route(
+    "/databases/<db_name>/tables/<table_name>/structure/columns/<column_name>/edit",
+    methods=["POST"],
+)
+def edit_column(db_name: str, table_name: str, column_name: str) -> Any:
+    if not is_authenticated():
+        return redirect(url_for("login"))
+
+    if not safe_database_name(db_name) or not safe_database_name(table_name):
+        abort(404)
+
+    tables_q = request.form.get("tables_q", "").strip()
+    new_name = request.form.get("new_name", "").strip()
+    new_type = request.form.get("new_type", "").strip().upper()
+    new_nullable = request.form.get("new_nullable", "0").strip() == "1"
+    default_mode = request.form.get("default_mode", "none").strip()
+    default_value = request.form.get("default_value", "")
+
+    if not safe_simple_identifier(new_name):
+        flash("Некорректное новое имя колонки.", "error")
+        return redirect(
+            url_for(
+                "table_structure",
+                db_name=db_name,
+                table_name=table_name,
+                tables_q=tables_q,
+            )
+        )
+    if new_type not in CREATE_TABLE_ALLOWED_TYPES:
+        flash("Недопустимый тип колонки.", "error")
+        return redirect(
+            url_for(
+                "table_structure",
+                db_name=db_name,
+                table_name=table_name,
+                tables_q=tables_q,
+            )
+        )
+
+    definition_sql, definition_params, definition_errors = build_column_definition_sql(
+        column_type=new_type,
+        nullable=new_nullable,
+        default_mode=default_mode,
+        default_value=default_value,
+    )
+    if definition_errors:
+        flash(definition_errors["default"], "error")
+        return redirect(
+            url_for(
+                "table_structure",
+                db_name=db_name,
+                table_name=table_name,
+                tables_q=tables_q,
+            )
+        )
+
+    try:
+        conn = mysql_connect()
+        try:
+            if not table_exists(conn, db_name, table_name):
+                abort(404)
+
+            columns_meta = fetch_columns_meta(conn, db_name, table_name)
+            target = next((col for col in columns_meta if col.name == column_name), None)
+            if not target:
+                flash("Колонка для изменения не найдена.", "error")
+                return redirect(
+                    url_for(
+                        "table_structure",
+                        db_name=db_name,
+                        table_name=table_name,
+                        tables_q=tables_q,
+                    )
+                )
+
+            extra_upper = target.extra.upper()
+            if "AUTO_INCREMENT" in extra_upper or "GENERATED" in extra_upper:
+                flash("Колонку с AUTO_INCREMENT/GENERATED пока нельзя изменить через UI.", "error")
+                return redirect(
+                    url_for(
+                        "table_structure",
+                        db_name=db_name,
+                        table_name=table_name,
+                        tables_q=tables_q,
+                    )
+                )
+
+            existing_names = {column.name for column in columns_meta}
+            if new_name != column_name and new_name in existing_names:
+                flash("Колонка с таким именем уже существует.", "error")
+                return redirect(
+                    url_for(
+                        "table_structure",
+                        db_name=db_name,
+                        table_name=table_name,
+                        tables_q=tables_q,
+                    )
+                )
+
+            sql = (
+                f"ALTER TABLE {quote_identifier(db_name)}.{quote_identifier(table_name)} "
+                f"CHANGE COLUMN {quote_identifier(column_name)} {quote_identifier(new_name)} "
+                f"{definition_sql}"
+            )
+            with conn.cursor() as cur:
+                cur.execute(sql, definition_params)
+        finally:
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception as exc:  # pragma: no cover - runtime-specific
+        flash(f"Не удалось изменить колонку: {exc}", "error")
+        return redirect(
+            url_for(
+                "table_structure",
+                db_name=db_name,
+                table_name=table_name,
+                tables_q=tables_q,
+            )
+        )
+
+    flash(f"Колонка '{column_name}' обновлена.", "success")
+    return redirect(
+        url_for(
+            "table_structure",
+            db_name=db_name,
+            table_name=table_name,
+            tables_q=tables_q,
+        )
+    )
+
+
+@app.route(
+    "/databases/<db_name>/tables/<table_name>/structure/columns/<column_name>/delete",
+    methods=["POST"],
+)
+def delete_column(db_name: str, table_name: str, column_name: str) -> Any:
+    if not is_authenticated():
+        return redirect(url_for("login"))
+
+    if not safe_database_name(db_name) or not safe_database_name(table_name):
+        abort(404)
+
+    tables_q = request.form.get("tables_q", "").strip()
+    confirm_name = request.form.get("confirm_name", "").strip()
+    if confirm_name != column_name:
+        flash("Подтверждение удаления колонки не совпало.", "error")
+        return redirect(
+            url_for(
+                "table_structure",
+                db_name=db_name,
+                table_name=table_name,
+                tables_q=tables_q,
+            )
+        )
+
+    try:
+        conn = mysql_connect()
+        try:
+            if not table_exists(conn, db_name, table_name):
+                abort(404)
+
+            columns_meta = fetch_columns_meta(conn, db_name, table_name)
+            target = next((col for col in columns_meta if col.name == column_name), None)
+            if not target:
+                flash("Колонка для удаления не найдена.", "error")
+                return redirect(
+                    url_for(
+                        "table_structure",
+                        db_name=db_name,
+                        table_name=table_name,
+                        tables_q=tables_q,
+                    )
+                )
+            if len(columns_meta) <= 1:
+                flash("Нельзя удалить последнюю колонку таблицы.", "error")
+                return redirect(
+                    url_for(
+                        "table_structure",
+                        db_name=db_name,
+                        table_name=table_name,
+                        tables_q=tables_q,
+                    )
+                )
+            if target.is_primary:
+                flash("Удаление PRIMARY KEY колонки через UI пока не поддерживается.", "error")
+                return redirect(
+                    url_for(
+                        "table_structure",
+                        db_name=db_name,
+                        table_name=table_name,
+                        tables_q=tables_q,
+                    )
+                )
+            if "GENERATED" in target.extra.upper():
+                flash("Удаление GENERATED колонки через UI пока не поддерживается.", "error")
+                return redirect(
+                    url_for(
+                        "table_structure",
+                        db_name=db_name,
+                        table_name=table_name,
+                        tables_q=tables_q,
+                    )
+                )
+
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"ALTER TABLE {quote_identifier(db_name)}.{quote_identifier(table_name)} "
+                    f"DROP COLUMN {quote_identifier(column_name)}"
+                )
+        finally:
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception as exc:  # pragma: no cover - runtime-specific
+        flash(f"Не удалось удалить колонку: {exc}", "error")
+        return redirect(
+            url_for(
+                "table_structure",
+                db_name=db_name,
+                table_name=table_name,
+                tables_q=tables_q,
+            )
+        )
+
+    flash(f"Колонка '{column_name}' удалена.", "success")
+    return redirect(
+        url_for(
+            "table_structure",
+            db_name=db_name,
+            table_name=table_name,
+            tables_q=tables_q,
+        )
     )
 
 
@@ -1083,6 +2822,15 @@ def create_row(db_name: str, table_name: str) -> Any:
 
     source_values = request.form if request.method == "POST" else request.args
     return_page, return_limit, return_tables_q = parse_table_return_state(source_values)
+    return_query = normalize_query_string(str(source_values.get("return_query", "")))
+    return_url = build_table_view_return_url(
+        db_name=db_name,
+        table_name=table_name,
+        return_query=return_query,
+        return_page=return_page,
+        return_limit=return_limit,
+        return_tables_q=return_tables_q,
+    )
     field_errors: dict[str, str] = {}
 
     try:
@@ -1143,16 +2891,7 @@ def create_row(db_name: str, table_name: str) -> Any:
                             )
 
                     flash("Строка успешно добавлена.", "success")
-                    return redirect(
-                        url_for(
-                            "table_view",
-                            db_name=db_name,
-                            table_name=table_name,
-                            page=return_page,
-                            limit=return_limit,
-                            tables_q=return_tables_q,
-                        )
-                    )
+                    return redirect(return_url)
         finally:
             conn.close()
     except HTTPException:
@@ -1174,6 +2913,7 @@ def create_row(db_name: str, table_name: str) -> Any:
         return_page=return_page,
         return_limit=return_limit,
         return_tables_q=return_tables_q,
+        return_query=return_query,
     )
 
 
@@ -1187,6 +2927,15 @@ def edit_row(db_name: str, table_name: str) -> Any:
 
     source_values = request.form if request.method == "POST" else request.args
     return_page, return_limit, return_tables_q = parse_table_return_state(source_values)
+    return_query = normalize_query_string(str(source_values.get("return_query", "")))
+    return_url = build_table_view_return_url(
+        db_name=db_name,
+        table_name=table_name,
+        return_query=return_query,
+        return_page=return_page,
+        return_limit=return_limit,
+        return_tables_q=return_tables_q,
+    )
     field_errors: dict[str, str] = {}
 
     try:
@@ -1202,45 +2951,18 @@ def edit_row(db_name: str, table_name: str) -> Any:
 
             if not primary_key_columns:
                 flash("Редактирование доступно только для таблиц с PRIMARY KEY.", "error")
-                return redirect(
-                    url_for(
-                        "table_view",
-                        db_name=db_name,
-                        table_name=table_name,
-                        page=return_page,
-                        limit=return_limit,
-                        tables_q=return_tables_q,
-                    )
-                )
+                return redirect(return_url)
 
             pk_filters = build_pk_filters(primary_key_columns, source_values)
 
             if not pk_filters:
                 flash("Не удалось определить PRIMARY KEY для выбранной строки.", "error")
-                return redirect(
-                    url_for(
-                        "table_view",
-                        db_name=db_name,
-                        table_name=table_name,
-                        page=return_page,
-                        limit=return_limit,
-                        tables_q=return_tables_q,
-                    )
-                )
+                return redirect(return_url)
 
             existing_row = fetch_row_by_pk(conn, db_name, table_name, pk_filters)
             if not existing_row:
                 flash("Строка не найдена.", "error")
-                return redirect(
-                    url_for(
-                        "table_view",
-                        db_name=db_name,
-                        table_name=table_name,
-                        page=return_page,
-                        limit=return_limit,
-                        tables_q=return_tables_q,
-                    )
-                )
+                return redirect(return_url)
 
             editable_columns = [
                 column
@@ -1291,16 +3013,7 @@ def edit_row(db_name: str, table_name: str) -> Any:
                             set_values + where_values,
                         )
                     flash("Строка успешно обновлена.", "success")
-                    return redirect(
-                        url_for(
-                            "table_view",
-                            db_name=db_name,
-                            table_name=table_name,
-                            page=return_page,
-                            limit=return_limit,
-                            tables_q=return_tables_q,
-                        )
-                    )
+                    return redirect(return_url)
         finally:
             conn.close()
     except HTTPException:
@@ -1322,6 +3035,7 @@ def edit_row(db_name: str, table_name: str) -> Any:
         return_page=return_page,
         return_limit=return_limit,
         return_tables_q=return_tables_q,
+        return_query=return_query,
     )
 
 
@@ -1334,6 +3048,15 @@ def delete_row(db_name: str, table_name: str) -> Any:
         abort(404)
 
     return_page, return_limit, return_tables_q = parse_table_return_state(request.form)
+    return_query = normalize_query_string(str(request.form.get("return_query", "")))
+    return_url = build_table_view_return_url(
+        db_name=db_name,
+        table_name=table_name,
+        return_query=return_query,
+        return_page=return_page,
+        return_limit=return_limit,
+        return_tables_q=return_tables_q,
+    )
 
     try:
         conn = mysql_connect()
@@ -1344,30 +3067,12 @@ def delete_row(db_name: str, table_name: str) -> Any:
             pk_columns = fetch_primary_key_columns(conn, db_name, table_name)
             if not pk_columns:
                 flash("Удаление доступно только для таблиц с PRIMARY KEY.", "error")
-                return redirect(
-                    url_for(
-                        "table_view",
-                        db_name=db_name,
-                        table_name=table_name,
-                        page=return_page,
-                        limit=return_limit,
-                        tables_q=return_tables_q,
-                    )
-                )
+                return redirect(return_url)
 
             pk_filters = build_pk_filters(pk_columns, request.form)
             if not pk_filters:
                 flash("Не удалось определить PRIMARY KEY для удаления.", "error")
-                return redirect(
-                    url_for(
-                        "table_view",
-                        db_name=db_name,
-                        table_name=table_name,
-                        page=return_page,
-                        limit=return_limit,
-                        tables_q=return_tables_q,
-                    )
-                )
+                return redirect(return_url)
 
             where_sql = " AND ".join(
                 f"{quote_identifier(column)} = %s" for column, _ in pk_filters
@@ -1393,16 +3098,289 @@ def delete_row(db_name: str, table_name: str) -> Any:
     except Exception as exc:  # pragma: no cover - runtime-specific
         flash(f"Ошибка удаления строки: {exc}", "error")
 
-    return redirect(
-        url_for(
-            "table_view",
-            db_name=db_name,
-            table_name=table_name,
-            page=return_page,
-            limit=return_limit,
-            tables_q=return_tables_q,
-        )
+    return redirect(return_url)
+
+
+@app.route("/databases/<db_name>/tables/<table_name>/rows/inline-update", methods=["POST"])
+def inline_update_row(db_name: str, table_name: str) -> Any:
+    if not is_authenticated():
+        return redirect(url_for("login"))
+
+    if not safe_database_name(db_name) or not safe_database_name(table_name):
+        abort(404)
+
+    return_page, return_limit, return_tables_q = parse_table_return_state(request.form)
+    return_query = normalize_query_string(str(request.form.get("return_query", "")))
+    return_url = build_table_view_return_url(
+        db_name=db_name,
+        table_name=table_name,
+        return_query=return_query,
+        return_page=return_page,
+        return_limit=return_limit,
+        return_tables_q=return_tables_q,
     )
+
+    try:
+        conn = mysql_connect()
+        try:
+            if not table_exists(conn, db_name, table_name):
+                abort(404)
+
+            columns_meta = fetch_columns_meta(conn, db_name, table_name)
+            primary_key_columns = [column.name for column in columns_meta if column.is_primary]
+            if not primary_key_columns:
+                flash("Inline-редактирование доступно только для таблиц с PRIMARY KEY.", "error")
+                return redirect(return_url)
+
+            pk_filters = build_pk_filters(primary_key_columns, request.form)
+            if not pk_filters:
+                flash("Не удалось определить PRIMARY KEY для inline-редактирования.", "error")
+                return redirect(return_url)
+
+            editable_columns = [
+                column
+                for column in columns_meta
+                if (not column.is_primary and "GENERATED" not in column.extra.upper())
+            ]
+            if not editable_columns:
+                flash("В таблице нет редактируемых колонок для inline-режима.", "error")
+                return redirect(return_url)
+
+            set_fragments: list[str] = []
+            set_values: list[Any] = []
+            field_errors: list[str] = []
+
+            for column in editable_columns:
+                raw_value = request.form.get(f"inline_{column.name}", "")
+                set_null = request.form.get(f"inline_set_null_{column.name}", "0") == "1"
+
+                if set_null:
+                    if not column.is_nullable:
+                        field_errors.append(
+                            f"Колонка '{column.name}' не поддерживает NULL."
+                        )
+                        continue
+                    value = None
+                else:
+                    value = normalize_form_value(raw_value, column, for_insert=False)
+                    if value is SKIP_VALUE:
+                        continue
+                    if value == "" and not column.is_nullable:
+                        field_errors.append(
+                            f"Поле '{column.name}' обязательно для заполнения."
+                        )
+                        continue
+
+                set_fragments.append(f"{quote_identifier(column.name)} = %s")
+                set_values.append(value)
+
+            if field_errors:
+                flash(field_errors[0], "error")
+                return redirect(return_url)
+
+            if not set_fragments:
+                flash("Нет полей для обновления.", "error")
+                return redirect(return_url)
+
+            where_sql = " AND ".join(
+                f"{quote_identifier(column)} = %s" for column, _ in pk_filters
+            )
+            where_values = [value for _, value in pk_filters]
+
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"UPDATE {quote_identifier(db_name)}.{quote_identifier(table_name)} "
+                    f"SET {', '.join(set_fragments)} WHERE {where_sql}",
+                    [*set_values, *where_values],
+                )
+                updated_count = max(cur.rowcount, 0)
+
+            if updated_count:
+                flash("Строка обновлена (inline).", "success")
+            else:
+                flash("Изменений не было (значения уже совпадают).", "error")
+        finally:
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception as exc:  # pragma: no cover - runtime-specific
+        flash(f"Ошибка inline-редактирования: {exc}", "error")
+
+    return redirect(return_url)
+
+
+@app.route("/databases/<db_name>/tables/<table_name>/rows/bulk", methods=["POST"])
+def bulk_rows(db_name: str, table_name: str) -> Any:
+    if not is_authenticated():
+        return redirect(url_for("login"))
+
+    if not safe_database_name(db_name) or not safe_database_name(table_name):
+        abort(404)
+
+    return_page, return_limit, return_tables_q = parse_table_return_state(request.form)
+    return_query = normalize_query_string(str(request.form.get("return_query", "")))
+    return_url = build_table_view_return_url(
+        db_name=db_name,
+        table_name=table_name,
+        return_query=return_query,
+        return_page=return_page,
+        return_limit=return_limit,
+        return_tables_q=return_tables_q,
+    )
+
+    bulk_action = request.form.get("bulk_action", "").strip()
+    selected_tokens = request.form.getlist("selected_rows")
+
+    if bulk_action not in {"delete", "update", "export_csv", "export_json"}:
+        flash("Некорректное bulk-действие.", "error")
+        return redirect(return_url)
+
+    if not selected_tokens:
+        flash("Выбери хотя бы одну строку.", "error")
+        return redirect(return_url)
+
+    try:
+        conn = mysql_connect()
+        try:
+            if not table_exists(conn, db_name, table_name):
+                abort(404)
+
+            pk_columns = fetch_primary_key_columns(conn, db_name, table_name)
+            if not pk_columns:
+                flash("Bulk-операции доступны только для таблиц с PRIMARY KEY.", "error")
+                return redirect(return_url)
+
+            columns_meta = fetch_columns_meta(conn, db_name, table_name)
+            column_by_name = {column.name: column for column in columns_meta}
+
+            selected_pk_maps: list[dict[str, str]] = []
+            signatures: set[str] = set()
+            for token in selected_tokens:
+                token = token.strip()
+                if not token:
+                    continue
+                try:
+                    parsed = json.loads(token)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(parsed, dict):
+                    continue
+                if any(column not in parsed for column in pk_columns):
+                    continue
+                pk_map = {column: str(parsed[column]) for column in pk_columns}
+                signature = "|".join(pk_map[column] for column in pk_columns)
+                if signature in signatures:
+                    continue
+                signatures.add(signature)
+                selected_pk_maps.append(pk_map)
+
+            if not selected_pk_maps:
+                flash("Не удалось прочитать выбранные строки.", "error")
+                return redirect(return_url)
+
+            where_groups: list[str] = []
+            where_params: list[Any] = []
+            for pk_map in selected_pk_maps:
+                group = []
+                for column in pk_columns:
+                    group.append(f"{quote_identifier(column)} = %s")
+                    where_params.append(pk_map[column])
+                where_groups.append(f"({' AND '.join(group)})")
+
+            where_sql = " OR ".join(where_groups)
+            table_sql = f"{quote_identifier(db_name)}.{quote_identifier(table_name)}"
+
+            if bulk_action == "delete":
+                with conn.cursor() as cur:
+                    cur.execute(f"DELETE FROM {table_sql} WHERE {where_sql}", where_params)
+                    deleted_count = max(cur.rowcount, 0)
+                if deleted_count:
+                    flash(f"Удалено строк: {deleted_count}.", "success")
+                else:
+                    flash("Ни одна строка не была удалена.", "error")
+                return redirect(return_url)
+
+            if bulk_action == "update":
+                update_column = request.form.get("bulk_update_column", "").strip()
+                update_raw_value = request.form.get("bulk_update_value", "")
+                set_null = request.form.get("bulk_set_null", "0") == "1"
+
+                if update_column not in column_by_name:
+                    flash("Колонка для массового обновления не найдена.", "error")
+                    return redirect(return_url)
+
+                target_column = column_by_name[update_column]
+                if "GENERATED" in target_column.extra.upper():
+                    flash("GENERATED колонку нельзя обновлять через bulk.", "error")
+                    return redirect(return_url)
+
+                if set_null:
+                    if not target_column.is_nullable:
+                        flash("Для этой колонки нельзя установить NULL.", "error")
+                        return redirect(return_url)
+                    update_value = None
+                else:
+                    update_value = normalize_form_value(
+                        update_raw_value,
+                        target_column,
+                        for_insert=False,
+                    )
+                    if update_value is SKIP_VALUE:
+                        flash("Эту колонку нельзя обновить выбранным способом.", "error")
+                        return redirect(return_url)
+                    if update_value == "" and not target_column.is_nullable:
+                        flash("Для этой колонки значение обязательно.", "error")
+                        return redirect(return_url)
+
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"UPDATE {table_sql} SET {quote_identifier(update_column)} = %s "
+                        f"WHERE {where_sql}",
+                        [update_value, *where_params],
+                    )
+                    updated_count = max(cur.rowcount, 0)
+
+                if updated_count:
+                    flash(f"Обновлено строк: {updated_count}.", "success")
+                else:
+                    flash("Изменений не было (возможно, значения уже совпадают).", "error")
+                return redirect(return_url)
+
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT * FROM {table_sql} WHERE {where_sql}", where_params)
+                export_rows = cur.fetchall()
+                export_columns = [str(column[0]) for column in cur.description or []]
+
+        finally:
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception as exc:  # pragma: no cover - runtime-specific
+        flash(f"Ошибка bulk-операции: {exc}", "error")
+        return redirect(return_url)
+
+    if bulk_action == "export_csv":
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(export_columns)
+        for row in export_rows:
+            writer.writerow([format_export_value(row.get(column)) for column in export_columns])
+
+        filename = f"{db_name}_{table_name}_selected.csv"
+        response = make_response(output.getvalue())
+        response.headers["Content-Type"] = "text/csv; charset=utf-8"
+        response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+        return response
+
+    export_payload = [
+        {column: json_export_value(row.get(column)) for column in export_columns}
+        for row in export_rows
+    ]
+    filename = f"{db_name}_{table_name}_selected.json"
+    response = make_response(json.dumps(export_payload, ensure_ascii=False, indent=2))
+    response.headers["Content-Type"] = "application/json; charset=utf-8"
+    response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return response
 
 
 @app.errorhandler(404)
