@@ -27,8 +27,16 @@
 
             <nav class="flex-1 overflow-y-auto text-sm px-2">
                 <div class="px-2 py-1 text-[11px] font-semibold text-slate-400 uppercase mt-2">Databases</div>
-                {% for db in databases %}
-                <a href="{{ url_for('sql_console', db_name=db.name) }}" class="mt-1 flex items-center gap-2 px-2 py-2 hover:bg-slate-200 cursor-pointer transition-colors rounded-lg {% if db.name == current_db %}bg-indigo-50 text-indigo-700{% elif db.is_system %}text-slate-400{% else %}text-slate-700{% endif %}">
+                {% for db in databases if not db.is_system %}
+                <a href="{{ url_for('sql_console', db_name=db.name) }}" class="mt-1 flex items-center gap-2 px-2 py-2 hover:bg-slate-200 cursor-pointer transition-colors rounded-lg {% if db.name == current_db %}bg-indigo-50 text-indigo-700{% else %}text-slate-700{% endif %}">
+                    <span class="font-medium">{{ db.name }}</span>
+                </a>
+                {% endfor %}
+
+                <div class="px-2 py-1 text-[11px] font-semibold text-slate-400 uppercase mt-4">System</div>
+                {% for db in databases if db.is_system %}
+                <a href="{{ url_for('sql_console', db_name=db.name) }}" class="mt-1 flex items-center gap-2 px-2 py-2 hover:bg-slate-200 cursor-pointer transition-colors rounded-lg {% if db.name == current_db %}bg-indigo-50 text-indigo-700{% else %}text-slate-400{% endif %}">
+                    <i class="ri-lock-line"></i>
                     <span class="font-medium">{{ db.name }}</span>
                 </a>
                 {% endfor %}

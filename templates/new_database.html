@@ -25,9 +25,18 @@
             <nav class="flex-1 overflow-y-auto text-sm px-2">
                 <div class="px-2 py-1 text-[11px] font-semibold text-slate-400 uppercase mt-2 font-bold tracking-widest">Databases</div>
                 <div class="mt-1 space-y-0.5">
-                    {% for db in databases %}
-                    <a href="{{ url_for('database_tables', db_name=db.name) }}" class="flex items-center gap-2 px-2 py-2 hover:bg-slate-200 transition-colors rounded-lg {% if db.is_system %}text-slate-400{% else %}text-slate-600{% endif %}">
+                    {% for db in databases if not db.is_system %}
+                    <a href="{{ url_for('database_tables', db_name=db.name) }}" class="flex items-center gap-2 px-2 py-2 hover:bg-slate-200 transition-colors rounded-lg text-slate-600">
                         <i class="ri-database-2-line text-slate-400"></i> {{ db.name }}
+                    </a>
+                    {% endfor %}
+                </div>
+
+                <div class="px-2 py-1 text-[11px] font-semibold text-slate-400 uppercase mt-4 font-bold tracking-widest">System</div>
+                <div class="mt-1 space-y-0.5">
+                    {% for db in databases if db.is_system %}
+                    <a href="{{ url_for('database_tables', db_name=db.name) }}" class="flex items-center gap-2 px-2 py-2 hover:bg-slate-200 transition-colors rounded-lg text-slate-400">
+                        <i class="ri-lock-line text-slate-300"></i> {{ db.name }}
                     </a>
                     {% endfor %}
                 </div>
