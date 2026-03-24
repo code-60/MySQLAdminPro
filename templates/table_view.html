@@ -46,12 +46,12 @@
             </nav>
         </aside>
 
-        <main class="flex-1 flex flex-col">
+        <main class="flex-1 min-w-0 flex flex-col">
             <header class="h-12 border-b border-slate-200 flex items-center justify-between px-6 bg-white">
                 <div class="flex items-center gap-4">
                     <div class="flex items-center gap-2 text-xs">
                         <span class="text-slate-400 font-mono">DB:</span>
-                        <span class="font-semibold">{{ current_db }}</span>
+                        <span class="font-semibold">{{ current_db }} 234</span>
                     </div>
                     <div class="h-4 w-[1px] bg-slate-200"></div>
                     <div class="flex gap-1">
@@ -67,7 +67,7 @@
                 </div>
             </header>
 
-            <div class="flex-1 overflow-auto p-6 bg-[#fcfcfc]">
+            <div class="flex-1 min-w-0 overflow-auto p-6 bg-[#fcfcfc]">
                 {% with messages = get_flashed_messages(with_categories=true) %}
                 {% if messages %}
                 <div class="space-y-2 mb-6">
@@ -88,21 +88,21 @@
                     <span class="text-[10px] text-slate-400 font-mono uppercase">{{ query_ms }}ms</span>
                 </div>
 
-                <div class="bg-white border border-slate-200 rounded-md shadow-sm overflow-x-auto">
-                    <table class="min-w-max w-full text-left border-collapse">
+                <div class="bg-white border border-slate-200 rounded-md shadow-sm w-full overflow-x-auto">
+                    <table class="w-max min-w-full table-auto text-left border-collapse">
                         <thead>
                             <tr class="bg-slate-50 border-b border-slate-200 text-[11px] font-bold text-slate-500 uppercase tracking-wider">
                                 {% for col in columns %}
-                                <th class="p-3 border-r border-slate-100">{{ col }}</th>
+                                <th class="p-3 min-w-[160px] border-r border-slate-100 whitespace-nowrap">{{ col }}</th>
                                 {% endfor %}
-                                <th class="p-3">Действия</th>
+                                <th class="p-3 min-w-[180px] whitespace-nowrap">Действия</th>
                             </tr>
                         </thead>
                         <tbody class="text-sm mono text-slate-700">
                             {% for row in row_items %}
                             <tr class="border-b border-slate-100 hover:bg-slate-50 group">
                                 {% for value in row.cells %}
-                                <td class="p-3 border-r border-slate-100 {% if value == 'NULL' %}text-slate-400 italic{% endif %}">{{ value }}</td>
+                                <td class="p-3 min-w-[160px] border-r border-slate-100 whitespace-nowrap {% if value == 'NULL' %}text-slate-400 italic{% endif %}">{{ value }}</td>
                                 {% endfor %}
                                 <td class="p-3 whitespace-nowrap font-sans">
                                     {% if has_primary_key and row.has_pk_values %}
