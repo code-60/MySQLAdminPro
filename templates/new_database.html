@@ -55,7 +55,7 @@
                         <span class="font-bold text-slate-900 uppercase tracking-tighter">Create Database</span>
                     </div>
                 </div>
-                <form method="post" action="{{ url_for('logout') }}">
+                <form method="post" action="{{ url_for('logout') }}" onsubmit="return confirm('Выйти из текущей сессии?');">
                     <button class="text-xs text-slate-400 hover:text-slate-900">Выход</button>
                 </form>
             </header>
@@ -82,27 +82,29 @@
                         <p class="text-sm text-slate-500 mt-1">Создайте новое хранилище на сервере <span class="mono text-slate-900 font-bold">{{ mysql_host }}</span></p>
                     </div>
 
-                    <form method="post" action="{{ url_for('create_database') }}" class="bg-white border border-slate-200 rounded-3xl p-8 shadow-sm">
+                    <form method="post" action="{{ url_for('create_database') }}" class="bg-white border border-slate-200 rounded-3xl p-8 shadow-sm" data-loading-form>
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
                             <div class="space-y-2">
                                 <label class="block text-[11px] font-bold text-slate-400 uppercase tracking-widest ml-1">Имя базы данных</label>
                                 <div class="relative">
                                     <i class="ri-database-2-line absolute left-3.5 top-3.5 text-slate-400 text-sm"></i>
-                                    <input type="text" name="database_name" value="{{ database_name }}" placeholder="Напр. code60_new_db" class="w-full pl-11 pr-4 py-3 bg-white border border-slate-300 rounded-xl text-sm focus:border-slate-950 focus:ring-1 focus:ring-slate-950 outline-none transition-all placeholder:text-slate-300">
+                                    <input type="text" name="database_name" value="{{ database_name }}" placeholder="Напр. code60_new_db" class="w-full pl-11 pr-4 py-3 bg-white border {% if field_errors.get('database_name') %}border-rose-400 bg-rose-50/40{% else %}border-slate-300{% endif %} rounded-xl text-sm focus:border-slate-950 focus:ring-1 focus:ring-slate-950 outline-none transition-all placeholder:text-slate-300">
                                 </div>
+                                {% if field_errors.get('database_name') %}<p class="text-[11px] text-rose-600 ml-1">{{ field_errors.get('database_name') }}</p>{% endif %}
                             </div>
 
                             <div class="space-y-2">
                                 <label class="block text-[11px] font-bold text-slate-400 uppercase tracking-widest ml-1">Кодировка (Collation)</label>
                                 <div class="relative">
                                     <i class="ri-global-line absolute left-3.5 top-3.5 text-slate-400 text-sm"></i>
-                                    <select name="collation" class="w-full pl-11 pr-10 py-3 bg-white border border-slate-300 rounded-xl text-sm appearance-none focus:border-slate-950 focus:ring-1 focus:ring-slate-950 outline-none transition-all cursor-pointer">
+                                    <select name="collation" class="w-full pl-11 pr-10 py-3 bg-white border {% if field_errors.get('collation') %}border-rose-400 bg-rose-50/40{% else %}border-slate-300{% endif %} rounded-xl text-sm appearance-none focus:border-slate-950 focus:ring-1 focus:ring-slate-950 outline-none transition-all cursor-pointer">
                                         {% for collation in collations %}
                                         <option value="{{ collation }}" {% if collation == selected_collation %}selected{% endif %}>{{ collation }}{% if collation == 'utf8mb4_unicode_ci' %} (Recommended){% endif %}</option>
                                         {% endfor %}
                                     </select>
                                     <i class="ri-arrow-down-s-line absolute right-4 top-3.5 text-slate-400 pointer-events-none"></i>
                                 </div>
+                                {% if field_errors.get('collation') %}<p class="text-[11px] text-rose-600 ml-1">{{ field_errors.get('collation') }}</p>{% endif %}
                             </div>
                         </div>
 
@@ -115,7 +117,7 @@
 
                         <div class="flex items-center justify-between">
                             <a href="{{ url_for('databases') }}" class="px-6 py-2.5 text-sm font-semibold text-slate-400 hover:text-slate-900 transition-colors">Отмена</a>
-                            <button type="submit" class="px-10 py-3 bg-slate-950 text-white rounded-xl text-sm font-semibold hover:bg-slate-800 transition-all shadow-lg shadow-slate-200">Создать базу</button>
+                            <button type="submit" data-loading-text="Создание..." class="px-10 py-3 bg-slate-950 text-white rounded-xl text-sm font-semibold hover:bg-slate-800 transition-all shadow-lg shadow-slate-200">Создать базу</button>
                         </div>
                     </form>
                 </div>
@@ -130,6 +132,21 @@
             </footer>
         </main>
     </div>
+
+    <script>
+        document.querySelectorAll('form[data-loading-form]').forEach((form) => {
+            form.addEventListener('submit', () => {
+                const submitButton = form.querySelector('button[type="submit"]');
+                if (!submitButton) {
+                    return;
+                }
+                submitButton.dataset.originalText = submitButton.textContent;
+                submitButton.textContent = submitButton.getAttribute('data-loading-text') || 'Обработка...';
+                submitButton.disabled = true;
+                submitButton.classList.add('opacity-70', 'cursor-not-allowed');
+            });
+        });
+    </script>
 
 </body>
 </html>

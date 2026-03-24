@@ -4,10 +4,21 @@
     <meta charset="UTF-8">
     <title>phpMyAdmin Pro v1.0 | SQL Console {{ current_db }}</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdn.jsdelivr.net/npm/remixicon@3.5.0/fonts/remixicon.css" rel="stylesheet">
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono&display=swap');
         body { font-family: 'Inter', sans-serif; letter-spacing: -0.01em; }
         .mono { font-family: 'JetBrains Mono', monospace; font-size: 13px; }
+        .data-grid-wrap {
+            width: 100%;
+            overflow-x: auto;
+            overflow-y: hidden;
+            -webkit-overflow-scrolling: touch;
+        }
+        .data-grid {
+            width: 100%;
+            min-width: max-content;
+        }
         ::-webkit-scrollbar { width: 6px; height: 6px; }
         ::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 10px; }
     </style>
@@ -22,7 +33,10 @@
             </div>
 
             <div class="p-3 space-y-2">
-                <a href="{{ url_for('database_tables', db_name=current_db) }}" class="w-full inline-flex justify-center bg-white border border-slate-300 rounded px-3 py-1.5 text-xs hover:border-slate-900 transition-colors">К таблицам</a>
+                <a href="{{ url_for('database_tables', db_name=current_db, q=tables_q) }}" class="w-full inline-flex justify-center bg-white border border-slate-300 rounded px-3 py-1.5 text-xs hover:border-slate-900 transition-colors">К таблицам</a>
+                {% if current_table %}
+                <a href="{{ url_for('table_view', db_name=current_db, table_name=current_table, page=return_page, limit=return_limit, tables_q=tables_q) }}" class="w-full inline-flex justify-center bg-white border border-slate-300 rounded px-3 py-1.5 text-xs hover:border-slate-900 transition-colors">К таблице {{ current_table }}</a>
+                {% endif %}
             </div>
 
             <nav class="flex-1 overflow-y-auto text-sm px-2">
@@ -52,12 +66,12 @@
                     </div>
                     <div class="h-4 w-[1px] bg-slate-200"></div>
                     <div class="flex gap-1">
-                        <a href="{{ url_for('database_tables', db_name=current_db) }}" class="px-3 py-1 text-xs font-medium text-slate-500 hover:bg-slate-100 rounded">Таблицы</a>
+                        <a href="{{ url_for('database_tables', db_name=current_db, q=tables_q) }}" class="px-3 py-1 text-xs font-medium text-slate-500 hover:bg-slate-100 rounded">Таблицы</a>
                         <button class="px-3 py-1 text-xs font-medium bg-slate-900 text-white rounded">SQL Console</button>
                     </div>
                 </div>
                 <div class="flex items-center gap-3">
-                    <form method="post" action="{{ url_for('logout') }}">
+                    <form method="post" action="{{ url_for('logout') }}" onsubmit="return confirm('Выйти из текущей сессии?');">
                         <button class="text-xs text-slate-400 hover:text-slate-900">Выход</button>
                     </form>
                 </div>
@@ -76,28 +90,45 @@
                 {% endif %}
                 {% endwith %}
 
-                <form method="post" action="{{ url_for('sql_console', db_name=current_db) }}" class="bg-white border border-slate-200 rounded-xl shadow-sm p-4 mb-5">
+                <form id="sql-form" method="post" action="{{ url_for('sql_console', db_name=current_db) }}" class="bg-white border border-slate-200 rounded-xl shadow-sm p-4 mb-5" data-loading-form>
+                    <input type="hidden" name="table" value="{{ current_table }}">
+                    <input type="hidden" name="return_page" value="{{ return_page }}">
+                    <input type="hidden" name="return_limit" value="{{ return_limit }}">
+                    <input type="hidden" name="tables_q" value="{{ tables_q }}">
+
                     <label class="block text-[11px] font-bold text-slate-400 uppercase tracking-widest mb-2">SQL Query</label>
-                    <textarea name="sql_query" rows="7" class="mono w-full px-3 py-2 border border-slate-300 rounded-lg outline-none focus:ring-1 focus:ring-slate-900 focus:border-slate-900">{{ sql_query }}</textarea>
-                    <div class="mt-3 flex items-center justify-between">
-                        <span class="text-xs text-slate-400">Исполнение в контексте базы: {{ current_db }}</span>
-                        <button type="submit" class="px-4 py-2 bg-slate-950 text-white rounded-lg text-xs font-semibold hover:bg-slate-800">Выполнить</button>
+                    <textarea id="sql-query" name="sql_query" rows="7" class="mono w-full px-3 py-2 border border-slate-300 rounded-lg outline-none focus:ring-1 focus:ring-slate-900 focus:border-slate-900">{{ sql_query }}</textarea>
+
+                    <div class="mt-3 grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
+                        <div>
+                            <label for="timeout_ms" class="block text-[11px] font-bold text-slate-400 uppercase tracking-widest mb-1">Timeout (ms)</label>
+                            <input id="timeout_ms" type="number" min="1000" max="300000" step="1000" name="timeout_ms" value="{{ timeout_ms }}" class="mono w-full px-3 py-2 border border-slate-300 rounded-lg outline-none focus:ring-1 focus:ring-slate-900 focus:border-slate-900">
+                        </div>
+                        <div class="md:col-span-2 flex items-center justify-between gap-3">
+                            <span class="text-xs text-slate-400">Исполнение в контексте базы: {{ current_db }}</span>
+                            <div class="flex items-center gap-2">
+                                <button id="sql-cancel" type="button" class="hidden px-4 py-2 border border-slate-300 rounded-lg text-xs font-semibold text-slate-700 hover:border-slate-900">Остановить ожидание</button>
+                                <button id="sql-submit" type="submit" data-loading-text="Выполнение..." class="px-4 py-2 bg-slate-950 text-white rounded-lg text-xs font-semibold hover:bg-slate-800">Выполнить</button>
+                            </div>
+                        </div>
                     </div>
                 </form>
 
-                {% if sql_history %}
                 <div class="mb-5 bg-white border border-slate-200 rounded-xl shadow-sm p-4">
                     <p class="text-[11px] font-bold text-slate-400 uppercase tracking-widest mb-3">История запросов (сессия)</p>
+                    {% if sql_history %}
                     <div class="space-y-2 max-h-44 overflow-y-auto">
                         {% for item in sql_history %}
-                        <a href="{{ url_for('sql_console', db_name=current_db, history=loop.index0) }}" class="block border border-slate-200 rounded-lg px-3 py-2 hover:border-slate-900 transition-colors">
+                        <a href="{{ url_for('sql_console', db_name=current_db, history=loop.index0, table=current_table, return_page=return_page, return_limit=return_limit, tables_q=tables_q) }}" class="block border border-slate-200 rounded-lg px-3 py-2 hover:border-slate-900 transition-colors">
                             <div class="mono text-xs text-slate-700 truncate">{{ item.query }}</div>
                             <div class="text-[10px] text-slate-400 mt-1">{{ item.executed_at }}</div>
                         </a>
                         {% endfor %}
                     </div>
+                    {% else %}
+                    <div class="text-xs text-slate-500">История пока пуста. Выполни первый запрос.</div>
+                    {% endif %}
                 </div>
-                {% endif %}
 
                 {% if query_ms is not none %}
                 <div class="mb-4 text-xs text-slate-500 mono">Execution: {{ query_ms }} ms</div>
@@ -108,29 +139,31 @@
                 {% endif %}
 
                 {% if result_columns %}
-                <div class="bg-white border border-slate-200 rounded-md shadow-sm overflow-x-auto">
-                    <table class="min-w-max w-full text-left border-collapse">
-                        <thead>
-                            <tr class="bg-slate-50 border-b border-slate-200 text-[11px] font-bold text-slate-500 uppercase tracking-wider">
-                                {% for col in result_columns %}
-                                <th class="p-3 border-r border-slate-100">{{ col }}</th>
+                <div class="bg-white border border-slate-200 rounded-md shadow-sm">
+                    <div class="data-grid-wrap">
+                        <table class="data-grid text-left border-collapse">
+                            <thead>
+                                <tr class="bg-slate-50 border-b border-slate-200 text-[11px] font-bold text-slate-500 uppercase tracking-wider">
+                                    {% for col in result_columns %}
+                                    <th class="p-3 border-r border-slate-100 min-w-[180px]">{{ col }}</th>
+                                    {% endfor %}
+                                </tr>
+                            </thead>
+                            <tbody class="text-sm mono text-slate-700">
+                                {% for row in result_rows %}
+                                <tr class="border-b border-slate-100 hover:bg-slate-50">
+                                    {% for value in row %}
+                                    <td class="p-3 border-r border-slate-100 whitespace-nowrap {% if value == 'NULL' %}text-slate-400 italic{% endif %}">{{ value }}</td>
+                                    {% endfor %}
+                                </tr>
+                                {% else %}
+                                <tr>
+                                    <td colspan="{{ result_columns|length }}" class="p-8 text-center text-xs text-slate-500">Запрос выполнен, но результат пуст.</td>
+                                </tr>
                                 {% endfor %}
-                            </tr>
-                        </thead>
-                        <tbody class="text-sm mono text-slate-700">
-                            {% for row in result_rows %}
-                            <tr class="border-b border-slate-100 hover:bg-slate-50">
-                                {% for value in row %}
-                                <td class="p-3 border-r border-slate-100 {% if value == 'NULL' %}text-slate-400 italic{% endif %}">{{ value }}</td>
-                                {% endfor %}
-                            </tr>
-                            {% else %}
-                            <tr>
-                                <td colspan="{{ result_columns|length }}" class="p-6 text-center text-xs text-slate-400">Результат пуст</td>
-                            </tr>
-                            {% endfor %}
-                        </tbody>
-                    </table>
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
 
                 <div class="mt-3 text-xs text-slate-500">
@@ -149,6 +182,44 @@
             </footer>
         </main>
     </div>
+
+    <script>
+        const sqlForm = document.getElementById('sql-form');
+        const sqlQuery = document.getElementById('sql-query');
+        const sqlSubmit = document.getElementById('sql-submit');
+        const sqlCancel = document.getElementById('sql-cancel');
+
+        function isDestructiveSql(queryText) {
+            const trimmed = queryText.trim().toUpperCase();
+            return /^(DELETE|DROP|TRUNCATE|ALTER|UPDATE|RENAME)\b/.test(trimmed);
+        }
+
+        if (sqlForm && sqlSubmit && sqlCancel && sqlQuery) {
+            sqlForm.addEventListener('submit', (event) => {
+                if (isDestructiveSql(sqlQuery.value)) {
+                    const allowed = window.confirm('Запрос изменяет данные. Продолжить выполнение?');
+                    if (!allowed) {
+                        event.preventDefault();
+                        return;
+                    }
+                }
+
+                sqlSubmit.dataset.originalText = sqlSubmit.textContent;
+                sqlSubmit.textContent = sqlSubmit.getAttribute('data-loading-text') || 'Выполнение...';
+                sqlSubmit.disabled = true;
+                sqlSubmit.classList.add('opacity-70', 'cursor-not-allowed');
+                sqlCancel.classList.remove('hidden');
+            });
+
+            sqlCancel.addEventListener('click', () => {
+                window.stop();
+                sqlSubmit.disabled = false;
+                sqlSubmit.textContent = sqlSubmit.dataset.originalText || 'Выполнить';
+                sqlSubmit.classList.remove('opacity-70', 'cursor-not-allowed');
+                sqlCancel.classList.add('hidden');
+            });
+        }
+    </script>
 
 </body>
 </html>

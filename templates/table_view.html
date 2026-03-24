@@ -8,6 +8,16 @@
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono&display=swap');
         body { font-family: 'Inter', sans-serif; letter-spacing: -0.01em; }
         .mono { font-family: 'JetBrains Mono', monospace; font-size: 13px; }
+        .data-grid-wrap {
+            width: 100%;
+            overflow-x: auto;
+            overflow-y: hidden;
+            -webkit-overflow-scrolling: touch;
+        }
+        .data-grid {
+            width: 100%;
+            min-width: max-content;
+        }
         ::-webkit-scrollbar { width: 6px; height: 6px; }
         ::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 10px; }
     </style>
@@ -22,8 +32,8 @@
             </div>
 
             <div class="p-3 space-y-2">
-                <a href="{{ url_for('database_tables', db_name=current_db) }}" class="w-full inline-flex justify-center bg-white border border-slate-300 rounded px-3 py-1.5 text-xs hover:border-slate-900 transition-colors">К таблицам</a>
-                <a href="{{ url_for('sql_console', db_name=current_db) }}" class="w-full inline-flex justify-center bg-white border border-slate-300 rounded px-3 py-1.5 text-xs hover:border-slate-900 transition-colors">SQL Console</a>
+                <a href="{{ url_for('database_tables', db_name=current_db, q=tables_q) }}" class="w-full inline-flex justify-center bg-white border border-slate-300 rounded px-3 py-1.5 text-xs hover:border-slate-900 transition-colors">К таблицам</a>
+                <a href="{{ url_for('sql_console', db_name=current_db, table=current_table, return_page=page, return_limit=limit, tables_q=tables_q) }}" class="w-full inline-flex justify-center bg-white border border-slate-300 rounded px-3 py-1.5 text-xs hover:border-slate-900 transition-colors">SQL Console</a>
             </div>
 
             <nav class="flex-1 overflow-y-auto text-sm">
@@ -31,8 +41,11 @@
                 <div class="px-4 py-2 text-sm font-bold text-slate-700">{{ current_db }}</div>
                 <div class="px-4 py-1 text-[11px] font-semibold text-slate-400 uppercase mt-2">Tables</div>
                 <div class="mt-1 pb-4">
-                    {% for table in tables %}
-                    <a href="{{ url_for('table_view', db_name=current_db, table_name=table.name, limit=limit, page=1) }}" class="block px-4 py-2 text-xs border-l-2 {% if table.name == current_table %}text-indigo-600 bg-indigo-50 border-indigo-600 font-semibold{% else %}text-slate-600 border-transparent hover:text-indigo-600 hover:bg-indigo-50{% endif %} transition-all">{{ table.name }}</a>
+                    {% set table_list = sidebar_tables if sidebar_tables is defined else tables %}
+                    {% for table in table_list %}
+                    <a href="{{ url_for('table_view', db_name=current_db, table_name=table.name, limit=limit, page=1, tables_q=tables_q) }}" class="block px-4 py-2 text-xs border-l-2 {% if table.name == current_table %}text-indigo-600 bg-indigo-50 border-indigo-600 font-semibold{% else %}text-slate-600 border-transparent hover:text-indigo-600 hover:bg-indigo-50{% endif %} transition-all">{{ table.name }}</a>
+                    {% else %}
+                    <div class="px-4 py-2 text-xs text-slate-400">Таблицы не найдены по фильтру.</div>
                     {% endfor %}
                 </div>
             </nav>
@@ -43,17 +56,17 @@
                 <div class="flex items-center gap-4">
                     <div class="flex items-center gap-2 text-xs">
                         <span class="text-slate-400 font-mono">DB:</span>
-                        <span class="font-semibold">{{ current_db }} 234</span>
+                        <span class="font-semibold">{{ current_db }}</span>
                     </div>
                     <div class="h-4 w-[1px] bg-slate-200"></div>
                     <div class="flex gap-1">
                         <button class="px-3 py-1 text-xs font-medium bg-slate-900 text-white rounded">Обзор</button>
-                        <a href="{{ url_for('sql_console', db_name=current_db) }}" class="px-3 py-1 text-xs font-medium text-slate-500 hover:bg-slate-100 rounded">SQL</a>
+                        <a href="{{ url_for('sql_console', db_name=current_db, table=current_table, return_page=page, return_limit=limit, tables_q=tables_q) }}" class="px-3 py-1 text-xs font-medium text-slate-500 hover:bg-slate-100 rounded">SQL</a>
                     </div>
                 </div>
                 <div class="flex items-center gap-3">
-                    <a href="{{ url_for('create_row', db_name=current_db, table_name=current_table) }}" class="text-xs text-indigo-600 font-medium hover:underline">+ Добавить строку</a>
-                    <form method="post" action="{{ url_for('logout') }}">
+                    <a href="{{ url_for('create_row', db_name=current_db, table_name=current_table, return_page=page, return_limit=limit, return_tables_q=tables_q) }}" class="text-xs text-indigo-600 font-medium hover:underline">+ Добавить строку</a>
+                    <form method="post" action="{{ url_for('logout') }}" data-confirm="Выйти из текущей сессии?">
                         <button class="text-xs text-slate-400 hover:text-slate-900">Выход</button>
                     </form>
                 </div>
@@ -72,7 +85,7 @@
                 {% endif %}
                 {% endwith %}
 
-                <div class="mb-4 flex items-center justify-between bg-white border border-slate-200 rounded-md px-4 py-2 shadow-sm">
+                <div class="mb-4 flex items-center justify-between gap-4 bg-white border border-slate-200 rounded-md px-4 py-2 shadow-sm">
                     <div class="flex items-center gap-3 overflow-x-auto">
                         <span class="w-2 h-2 rounded-full bg-green-500"></span>
                         <code class="mono text-slate-600">SELECT * FROM `{{ current_table }}` LIMIT {{ limit }} OFFSET {{ offset }};</code>
@@ -80,69 +93,75 @@
                     <span class="text-[10px] text-slate-400 font-mono uppercase">{{ query_ms }}ms</span>
                 </div>
 
-                <div class="bg-white border border-slate-200 rounded-md shadow-sm w-full overflow-x-auto">
-                    <table class="w-max min-w-full table-auto text-left border-collapse">
-                        <thead>
-                            <tr class="bg-slate-50 border-b border-slate-200 text-[11px] font-bold text-slate-500 uppercase tracking-wider">
-                                {% for col in columns %}
-                                <th class="p-3 min-w-[160px] border-r border-slate-100 whitespace-nowrap">{{ col }}</th>
+                <div class="bg-white border border-slate-200 rounded-md shadow-sm w-full">
+                    <div class="data-grid-wrap">
+                        <table class="data-grid table-auto text-left border-collapse">
+                            <thead>
+                                <tr class="bg-slate-50 border-b border-slate-200 text-[11px] font-bold text-slate-500 uppercase tracking-wider">
+                                    {% for col in columns %}
+                                    <th class="p-3 min-w-[180px] border-r border-slate-100 whitespace-nowrap">{{ col }}</th>
+                                    {% endfor %}
+                                    <th class="p-3 min-w-[220px] whitespace-nowrap">Действия</th>
+                                </tr>
+                            </thead>
+                            <tbody class="text-sm mono text-slate-700">
+                                {% for row in row_items %}
+                                <tr class="border-b border-slate-100 hover:bg-slate-50 group">
+                                    {% for value in row.cells %}
+                                    <td class="p-3 min-w-[180px] border-r border-slate-100 whitespace-nowrap {% if value == 'NULL' %}text-slate-400 italic{% endif %}">{{ value }}</td>
+                                    {% endfor %}
+                                    <td class="p-3 whitespace-nowrap font-sans">
+                                        {% if has_primary_key and row.has_pk_values %}
+                                        <form method="get" action="{{ url_for('edit_row', db_name=current_db, table_name=current_table) }}" class="inline">
+                                            {% for pk in row.pk_items %}
+                                            <input type="hidden" name="pk_{{ pk.name }}" value="{{ pk.value }}">
+                                            {% endfor %}
+                                            <input type="hidden" name="return_page" value="{{ page }}">
+                                            <input type="hidden" name="return_limit" value="{{ limit }}">
+                                            <input type="hidden" name="return_tables_q" value="{{ tables_q }}">
+                                            <button type="submit" class="p-1.5 px-2.5 bg-blue-50 text-blue-700 text-xs font-bold rounded-lg hover:bg-blue-100">Редактировать</button>
+                                        </form>
+                                        <form method="post" action="{{ url_for('delete_row', db_name=current_db, table_name=current_table) }}" class="inline" data-confirm="Удалить эту строку?" data-loading-form>
+                                            {% for pk in row.pk_items %}
+                                            <input type="hidden" name="pk_{{ pk.name }}" value="{{ pk.value }}">
+                                            {% endfor %}
+                                            <input type="hidden" name="return_page" value="{{ page }}">
+                                            <input type="hidden" name="return_limit" value="{{ limit }}">
+                                            <input type="hidden" name="return_tables_q" value="{{ tables_q }}">
+                                            <button type="submit" data-loading-text="Удаление..." class="p-1.5 px-2.5 bg-rose-50 text-rose-700 text-xs font-bold rounded-lg hover:bg-rose-100">Удалить</button>
+                                        </form>
+                                        {% else %}
+                                        <span class="text-xs text-slate-400">Нет PK</span>
+                                        {% endif %}
+                                    </td>
+                                </tr>
+                                {% else %}
+                                <tr>
+                                    <td colspan="{{ (columns|length) + 1 if columns else 2 }}" class="p-8 text-center">
+                                        <div class="text-xs text-slate-500">В таблице пока нет строк.</div>
+                                    </td>
+                                </tr>
                                 {% endfor %}
-                                <th class="p-3 min-w-[180px] whitespace-nowrap">Действия</th>
-                            </tr>
-                        </thead>
-                        <tbody class="text-sm mono text-slate-700">
-                            {% for row in row_items %}
-                            <tr class="border-b border-slate-100 hover:bg-slate-50 group">
-                                {% for value in row.cells %}
-                                <td class="p-3 min-w-[160px] border-r border-slate-100 whitespace-nowrap {% if value == 'NULL' %}text-slate-400 italic{% endif %}">{{ value }}</td>
-                                {% endfor %}
-                                <td class="p-3 whitespace-nowrap font-sans">
-                                    {% if has_primary_key and row.has_pk_values %}
-                                    <form method="get" action="{{ url_for('edit_row', db_name=current_db, table_name=current_table) }}" class="inline">
-                                        {% for pk in row.pk_items %}
-                                        <input type="hidden" name="pk_{{ pk.name }}" value="{{ pk.value }}">
-                                        {% endfor %}
-                                        <input type="hidden" name="return_page" value="{{ page }}">
-                                        <input type="hidden" name="return_limit" value="{{ limit }}">
-                                        <button type="submit" class="p-1.5 px-2.5 bg-blue-50 text-blue-700 text-xs font-bold rounded-lg hover:bg-blue-100">Редактировать</button>
-                                    </form>
-                                    <form method="post" action="{{ url_for('delete_row', db_name=current_db, table_name=current_table) }}" class="inline" onsubmit="return confirm('Удалить эту строку?');">
-                                        {% for pk in row.pk_items %}
-                                        <input type="hidden" name="pk_{{ pk.name }}" value="{{ pk.value }}">
-                                        {% endfor %}
-                                        <input type="hidden" name="return_page" value="{{ page }}">
-                                        <input type="hidden" name="return_limit" value="{{ limit }}">
-                                        <button type="submit" class="p-1.5 px-2.5 bg-rose-50 text-rose-700 text-xs font-bold rounded-lg hover:bg-rose-100">Удалить</button>
-                                    </form>
-                                    {% else %}
-                                    <span class="text-xs text-slate-400">Нет PK</span>
-                                    {% endif %}
-                                </td>
-                            </tr>
-                            {% else %}
-                            <tr>
-                                <td colspan="{{ (columns|length) + 1 if columns else 2 }}" class="p-6 text-center text-xs text-slate-400">Таблица не содержит строк</td>
-                            </tr>
-                            {% endfor %}
-                        </tbody>
-                    </table>
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
 
-                <div class="mt-4 flex justify-between items-center text-xs text-slate-500">
+                <div class="mt-4 flex flex-wrap justify-between gap-4 items-center text-xs text-slate-500">
                     <div>
                         Строки {{ rows_from }}-{{ rows_to }} (страница {{ page }}). Оценка строк в таблице: {{ estimated_rows }}.
                         {% if not has_primary_key %}<span class="text-rose-500">Для Edit/Delete нужен PRIMARY KEY.</span>{% endif %}
                     </div>
                     <div class="flex gap-2 items-center">
-                        <a href="{{ url_for('table_view', db_name=current_db, table_name=current_table, limit=50, page=1) }}" class="px-2 py-1 border border-slate-200 rounded hover:bg-white shadow-sm">50</a>
-                        <a href="{{ url_for('table_view', db_name=current_db, table_name=current_table, limit=100, page=1) }}" class="px-2 py-1 border border-slate-200 rounded hover:bg-white shadow-sm">100</a>
-                        <a href="{{ url_for('table_view', db_name=current_db, table_name=current_table, limit=500, page=1) }}" class="px-2 py-1 border border-slate-200 rounded hover:bg-white shadow-sm">500</a>
+                        <a href="{{ url_for('table_view', db_name=current_db, table_name=current_table, limit=50, page=1, tables_q=tables_q) }}" class="px-2 py-1 border border-slate-200 rounded hover:bg-white shadow-sm">50</a>
+                        <a href="{{ url_for('table_view', db_name=current_db, table_name=current_table, limit=100, page=1, tables_q=tables_q) }}" class="px-2 py-1 border border-slate-200 rounded hover:bg-white shadow-sm">100</a>
+                        <a href="{{ url_for('table_view', db_name=current_db, table_name=current_table, limit=500, page=1, tables_q=tables_q) }}" class="px-2 py-1 border border-slate-200 rounded hover:bg-white shadow-sm">500</a>
                         {% if has_prev_page %}
-                        <a href="{{ url_for('table_view', db_name=current_db, table_name=current_table, limit=limit, page=prev_page) }}" class="px-2 py-1 border border-slate-200 rounded hover:bg-white shadow-sm">← Пред.</a>
+                        <a href="{{ url_for('table_view', db_name=current_db, table_name=current_table, limit=limit, page=prev_page, tables_q=tables_q) }}" class="px-2 py-1 border border-slate-200 rounded hover:bg-white shadow-sm">← Пред.</a>
                         {% endif %}
                         <span class="px-2 py-1 border border-slate-300 rounded bg-white shadow-sm text-slate-900 font-bold">{{ page }}</span>
                         {% if has_next_page %}
-                        <a href="{{ url_for('table_view', db_name=current_db, table_name=current_table, limit=limit, page=next_page) }}" class="px-2 py-1 border border-slate-200 rounded hover:bg-white shadow-sm">След. →</a>
+                        <a href="{{ url_for('table_view', db_name=current_db, table_name=current_table, limit=limit, page=next_page, tables_q=tables_q) }}" class="px-2 py-1 border border-slate-200 rounded hover:bg-white shadow-sm">След. →</a>
                         {% endif %}
                     </div>
                 </div>
@@ -157,6 +176,30 @@
             </footer>
         </main>
     </div>
+
+    <script>
+        document.querySelectorAll('form[data-confirm]').forEach((form) => {
+            form.addEventListener('submit', (event) => {
+                const message = form.getAttribute('data-confirm') || 'Подтвердить действие?';
+                if (!window.confirm(message)) {
+                    event.preventDefault();
+                }
+            });
+        });
+
+        document.querySelectorAll('form[data-loading-form]').forEach((form) => {
+            form.addEventListener('submit', () => {
+                const submitButton = form.querySelector('button[type="submit"]');
+                if (!submitButton) {
+                    return;
+                }
+                submitButton.dataset.originalText = submitButton.textContent;
+                submitButton.textContent = submitButton.getAttribute('data-loading-text') || 'Обработка...';
+                submitButton.disabled = true;
+                submitButton.classList.add('opacity-70', 'cursor-not-allowed');
+            });
+        });
+    </script>
 
 </body>
 </html>

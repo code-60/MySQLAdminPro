@@ -64,7 +64,7 @@
                 </div>
                 <div class="flex items-center gap-4">
                     <a href="{{ url_for('create_database') }}" class="text-xs text-indigo-600 font-medium hover:underline">+ Создать БД</a>
-                    <form method="post" action="{{ url_for('logout') }}">
+                    <form method="post" action="{{ url_for('logout') }}" onsubmit="return confirm('Выйти из текущей сессии?');">
                         <button class="text-xs text-slate-400 hover:text-slate-900">Выход</button>
                     </form>
                 </div>
@@ -109,6 +109,10 @@
                             <span>{{ '%.2f'|format(db.size_mb) }} MB</span>
                         </div>
                     </a>
+                    {% else %}
+                    <div class="md:col-span-2 border border-slate-200 rounded-xl p-6 bg-slate-50 text-sm text-slate-500">
+                        Базы данных по текущему фильтру не найдены.
+                    </div>
                     {% endfor %}
 
                     <a href="{{ url_for('create_database') }}" class="border border-slate-200 border-dashed rounded-xl p-5 flex items-center justify-center hover:bg-slate-50 hover:border-slate-400 transition-all cursor-pointer group">

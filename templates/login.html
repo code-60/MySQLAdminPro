@@ -41,21 +41,23 @@
             {% endif %}
             {% endwith %}
 
-            <form class="space-y-5" method="post" action="{{ url_for('login') }}">
+            <form class="space-y-5" method="post" action="{{ url_for('login') }}" data-loading-form>
                 <div class="grid grid-cols-2 gap-3">
                     <div>
                         <label for="host" class="block text-[11px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 ml-1">Сервер</label>
                         <div class="relative">
                             <i class="ri-server-line absolute left-3.5 top-3.5 text-slate-400 text-sm"></i>
-                            <input type="text" id="host" name="host" value="{{ host }}" class="w-full pl-11 pr-4 py-3 bg-white border border-slate-300 rounded-xl text-sm focus:border-slate-900 focus:ring-1 focus:ring-slate-900 outline-none transition-all placeholder:text-slate-300">
+                            <input type="text" id="host" name="host" value="{{ host }}" class="w-full pl-11 pr-4 py-3 bg-white border {% if field_errors.get('host') %}border-rose-400 bg-rose-50/40{% else %}border-slate-300{% endif %} rounded-xl text-sm focus:border-slate-900 focus:ring-1 focus:ring-slate-900 outline-none transition-all placeholder:text-slate-300">
                         </div>
+                        {% if field_errors.get('host') %}<p class="text-[11px] text-rose-600 mt-1 ml-1">{{ field_errors.get('host') }}</p>{% endif %}
                     </div>
                     <div>
                         <label for="port" class="block text-[11px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 ml-1">Порт</label>
                         <div class="relative">
                             <i class="ri-plug-line absolute left-3.5 top-3.5 text-slate-400 text-sm"></i>
-                            <input type="text" id="port" name="port" value="{{ port }}" class="w-full pl-11 pr-4 py-3 bg-white border border-slate-300 rounded-xl text-sm focus:border-slate-900 focus:ring-1 focus:ring-slate-900 outline-none transition-all placeholder:text-slate-300">
+                            <input type="text" id="port" name="port" value="{{ port }}" class="w-full pl-11 pr-4 py-3 bg-white border {% if field_errors.get('port') %}border-rose-400 bg-rose-50/40{% else %}border-slate-300{% endif %} rounded-xl text-sm focus:border-slate-900 focus:ring-1 focus:ring-slate-900 outline-none transition-all placeholder:text-slate-300">
                         </div>
+                        {% if field_errors.get('port') %}<p class="text-[11px] text-rose-600 mt-1 ml-1">{{ field_errors.get('port') }}</p>{% endif %}
                     </div>
                 </div>
 
@@ -63,8 +65,9 @@
                     <label for="username" class="block text-[11px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 ml-1">Пользователь (MySQL)</label>
                     <div class="relative">
                         <i class="ri-user-3-line absolute left-3.5 top-3.5 text-slate-400 text-sm"></i>
-                        <input type="text" id="username" name="username" value="{{ username }}" placeholder="Введите логин..." class="w-full pl-11 pr-4 py-3 bg-white border border-slate-300 rounded-xl text-sm focus:border-slate-900 focus:ring-1 focus:ring-slate-900 outline-none transition-all placeholder:text-slate-300">
+                        <input type="text" id="username" name="username" value="{{ username }}" placeholder="Введите логин..." class="w-full pl-11 pr-4 py-3 bg-white border {% if field_errors.get('username') %}border-rose-400 bg-rose-50/40{% else %}border-slate-300{% endif %} rounded-xl text-sm focus:border-slate-900 focus:ring-1 focus:ring-slate-900 outline-none transition-all placeholder:text-slate-300">
                     </div>
+                    {% if field_errors.get('username') %}<p class="text-[11px] text-rose-600 mt-1 ml-1">{{ field_errors.get('username') }}</p>{% endif %}
                 </div>
 
                 <div class="pb-1">
@@ -75,7 +78,7 @@
                     </div>
                 </div>
 
-                <button type="submit" class="w-full py-3.5 bg-slate-950 text-white rounded-xl text-sm font-semibold hover:bg-slate-800 transition-all shadow-lg shadow-slate-200 flex items-center justify-center gap-2">
+                <button type="submit" data-loading-text="Подключение..." class="w-full py-3.5 bg-slate-950 text-white rounded-xl text-sm font-semibold hover:bg-slate-800 transition-all shadow-lg shadow-slate-200 flex items-center justify-center gap-2">
                     Войти в систему <i class="ri-arrow-right-line"></i>
                 </button>
             </form>
@@ -89,6 +92,21 @@
     <footer class="h-8 bg-slate-900 text-[10px] text-slate-400 px-6 flex items-center justify-center uppercase tracking-widest">
         © PHPMyADMIN PRO • precision database tools v1.0
     </footer>
+
+    <script>
+        document.querySelectorAll('form[data-loading-form]').forEach((form) => {
+            form.addEventListener('submit', () => {
+                const submitButton = form.querySelector('button[type="submit"]');
+                if (!submitButton) {
+                    return;
+                }
+                submitButton.dataset.originalText = submitButton.textContent;
+                submitButton.textContent = submitButton.getAttribute('data-loading-text') || 'Обработка...';
+                submitButton.disabled = true;
+                submitButton.classList.add('opacity-70', 'cursor-not-allowed');
+            });
+        });
+    </script>
 
 </body>
 </html>

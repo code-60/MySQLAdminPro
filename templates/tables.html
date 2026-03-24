@@ -9,6 +9,16 @@
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono&display=swap');
         body { font-family: 'Inter', sans-serif; letter-spacing: -0.01em; }
         .mono { font-family: 'JetBrains Mono', monospace; font-size: 13px; }
+        .data-grid-wrap {
+            width: 100%;
+            overflow-x: auto;
+            overflow-y: hidden;
+            -webkit-overflow-scrolling: touch;
+        }
+        .data-grid {
+            width: 100%;
+            min-width: max-content;
+        }
         ::-webkit-scrollbar { width: 5px; height: 5px; }
         ::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 10px; }
     </style>
@@ -62,7 +72,7 @@
                 </div>
                 <div class="flex items-center gap-3">
                     <a href="{{ url_for('create_database') }}" class="text-xs text-indigo-600 font-medium hover:underline">+ Новая база</a>
-                    <form method="post" action="{{ url_for('logout') }}">
+                    <form method="post" action="{{ url_for('logout') }}" onsubmit="return confirm('Выйти из текущей сессии?');">
                         <button class="text-xs text-slate-400 hover:text-slate-900">Выход</button>
                     </form>
                 </div>
@@ -95,7 +105,7 @@
                     </div>
                 </div>
 
-                <div class="bg-white border border-slate-200 rounded-lg shadow-sm overflow-x-auto">
+                <div class="bg-white border border-slate-200 rounded-lg shadow-sm">
                     <div class="p-4 border-b border-slate-100 bg-slate-50/50 flex justify-between items-center">
                         <div class="relative w-64">
                             <i class="ri-filter-3-line absolute left-3 top-2.5 text-slate-400 text-sm"></i>
@@ -108,45 +118,47 @@
                         </div>
                     </div>
 
-                    <table class="min-w-max w-full text-left border-collapse">
-                        <thead>
-                            <tr class="bg-slate-50/50 border-b border-slate-100 text-[11px] font-bold text-slate-500 uppercase tracking-wider">
-                                <th class="p-3.5 border-r border-slate-100">Имя таблицы</th>
-                                <th class="p-3.5 border-r border-slate-100">Строк</th>
-                                <th class="p-3.5 border-r border-slate-100">Движок</th>
-                                <th class="p-3.5 border-r border-slate-100">Кодировка</th>
-                                <th class="p-3.5 border-r border-slate-100">Размер</th>
-                                <th class="p-3.5">Действия</th>
-                            </tr>
-                        </thead>
-                        <tbody class="text-sm mono text-slate-800">
-                            {% for table in tables %}
-                            <tr class="border-b border-slate-100 hover:bg-slate-50 group">
-                                <td class="p-3 border-r border-slate-100 font-bold text-slate-900 font-sans">
-                                    <div class="flex items-center gap-3">
-                                        <i class="ri-table-line text-slate-300 group-hover:text-indigo-500 transition-colors"></i>
-                                        <a href="{{ url_for('table_view', db_name=current_db, table_name=table.name) }}" class="underline decoration-slate-200 underline-offset-4">{{ table.name }}</a>
-                                    </div>
-                                </td>
-                                <td class="p-3 border-r border-slate-100 text-slate-600">{{ table.rows_count }}</td>
-                                <td class="p-3 border-r border-slate-100 font-sans">
-                                    <span class="px-2 py-0.5 border border-slate-200 rounded text-[10px] font-bold">{{ table.engine or 'n/a' }}</span>
-                                </td>
-                                <td class="p-3 border-r border-slate-100 font-sans">
-                                    <span class="px-2 py-0.5 border border-blue-200 bg-blue-50 text-blue-700 rounded text-[10px] font-bold uppercase">{{ table.collation or 'n/a' }}</span>
-                                </td>
-                                <td class="p-3 border-r border-slate-100 text-slate-600">{{ '%.2f'|format(table.size_mb) }} MB</td>
-                                <td class="p-3 font-sans whitespace-nowrap">
-                                    <a href="{{ url_for('table_view', db_name=current_db, table_name=table.name) }}" class="p-1.5 px-2.5 bg-green-50 text-green-700 text-xs font-bold rounded-lg hover:bg-green-100"><i class="ri-eye-line mr-1"></i> Обзор</a>
-                                </td>
-                            </tr>
-                            {% else %}
-                            <tr>
-                                <td colspan="6" class="p-6 text-center text-xs text-slate-400">Таблицы не найдены</td>
-                            </tr>
-                            {% endfor %}
-                        </tbody>
-                    </table>
+                    <div class="data-grid-wrap">
+                        <table class="data-grid text-left border-collapse">
+                            <thead>
+                                <tr class="bg-slate-50/50 border-b border-slate-100 text-[11px] font-bold text-slate-500 uppercase tracking-wider">
+                                    <th class="p-3.5 border-r border-slate-100">Имя таблицы</th>
+                                    <th class="p-3.5 border-r border-slate-100">Строк</th>
+                                    <th class="p-3.5 border-r border-slate-100">Движок</th>
+                                    <th class="p-3.5 border-r border-slate-100">Кодировка</th>
+                                    <th class="p-3.5 border-r border-slate-100">Размер</th>
+                                    <th class="p-3.5">Действия</th>
+                                </tr>
+                            </thead>
+                            <tbody class="text-sm mono text-slate-800">
+                                {% for table in tables %}
+                                <tr class="border-b border-slate-100 hover:bg-slate-50 group">
+                                    <td class="p-3 border-r border-slate-100 font-bold text-slate-900 font-sans min-w-[260px]">
+                                        <div class="flex items-center gap-3">
+                                            <i class="ri-table-line text-slate-300 group-hover:text-indigo-500 transition-colors"></i>
+                                            <a href="{{ url_for('table_view', db_name=current_db, table_name=table.name, tables_q=filter_query) }}" class="underline decoration-slate-200 underline-offset-4">{{ table.name }}</a>
+                                        </div>
+                                    </td>
+                                    <td class="p-3 border-r border-slate-100 text-slate-600">{{ table.rows_count }}</td>
+                                    <td class="p-3 border-r border-slate-100 font-sans">
+                                        <span class="px-2 py-0.5 border border-slate-200 rounded text-[10px] font-bold">{{ table.engine or 'n/a' }}</span>
+                                    </td>
+                                    <td class="p-3 border-r border-slate-100 font-sans">
+                                        <span class="px-2 py-0.5 border border-blue-200 bg-blue-50 text-blue-700 rounded text-[10px] font-bold uppercase">{{ table.collation or 'n/a' }}</span>
+                                    </td>
+                                    <td class="p-3 border-r border-slate-100 text-slate-600">{{ '%.2f'|format(table.size_mb) }} MB</td>
+                                    <td class="p-3 font-sans whitespace-nowrap">
+                                        <a href="{{ url_for('table_view', db_name=current_db, table_name=table.name, tables_q=filter_query) }}" class="p-1.5 px-2.5 bg-green-50 text-green-700 text-xs font-bold rounded-lg hover:bg-green-100"><i class="ri-eye-line mr-1"></i> Обзор</a>
+                                    </td>
+                                </tr>
+                                {% else %}
+                                <tr>
+                                    <td colspan="6" class="p-8 text-center text-xs text-slate-500">Таблицы не найдены. Измени фильтр или создай новую таблицу.</td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
             </div>
 

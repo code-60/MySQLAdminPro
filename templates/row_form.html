@@ -21,8 +21,8 @@
                 <span class="text-[10px] bg-slate-200 px-1.5 py-0.5 rounded font-mono">{{ mysql_port }}</span>
             </div>
             <div class="p-3 space-y-2">
-                <a href="{{ url_for('table_view', db_name=current_db, table_name=current_table) }}" class="w-full inline-flex justify-center bg-white border border-slate-300 rounded px-3 py-1.5 text-xs hover:border-slate-900 transition-colors">К таблице</a>
-                <a href="{{ url_for('sql_console', db_name=current_db) }}" class="w-full inline-flex justify-center bg-white border border-slate-300 rounded px-3 py-1.5 text-xs hover:border-slate-900 transition-colors">SQL Console</a>
+                <a href="{{ url_for('table_view', db_name=current_db, table_name=current_table, page=return_page, limit=return_limit, tables_q=return_tables_q) }}" class="w-full inline-flex justify-center bg-white border border-slate-300 rounded px-3 py-1.5 text-xs hover:border-slate-900 transition-colors">К таблице</a>
+                <a href="{{ url_for('sql_console', db_name=current_db, table=current_table, return_page=return_page, return_limit=return_limit, tables_q=return_tables_q) }}" class="w-full inline-flex justify-center bg-white border border-slate-300 rounded px-3 py-1.5 text-xs hover:border-slate-900 transition-colors">SQL Console</a>
             </div>
             <nav class="flex-1 overflow-y-auto text-sm px-2">
                 <div class="px-2 py-1 text-[11px] font-semibold text-slate-400 uppercase mt-2">Databases</div>
@@ -56,7 +56,7 @@
                         </button>
                     </div>
                 </div>
-                <form method="post" action="{{ url_for('logout') }}">
+                <form method="post" action="{{ url_for('logout') }}" onsubmit="return confirm('Выйти из текущей сессии?');">
                     <button class="text-xs text-slate-400 hover:text-slate-900">Выход</button>
                 </form>
             </header>
@@ -74,7 +74,7 @@
                 {% endif %}
                 {% endwith %}
 
-                <form method="post" action="{% if mode == 'create' %}{{ url_for('create_row', db_name=current_db, table_name=current_table) }}{% else %}{{ url_for('edit_row', db_name=current_db, table_name=current_table) }}{% endif %}" class="max-w-4xl bg-white border border-slate-200 rounded-2xl shadow-sm p-6">
+                <form method="post" action="{% if mode == 'create' %}{{ url_for('create_row', db_name=current_db, table_name=current_table) }}{% else %}{{ url_for('edit_row', db_name=current_db, table_name=current_table) }}{% endif %}" class="max-w-4xl bg-white border border-slate-200 rounded-2xl shadow-sm p-6" data-loading-form>
                     {% if mode == 'edit' %}
                         {% for pk in pk_filters %}
                         <input type="hidden" name="pk_{{ pk[0] }}" value="{{ pk[1] }}">
@@ -82,6 +82,7 @@
                     {% endif %}
                     <input type="hidden" name="return_page" value="{{ return_page }}">
                     <input type="hidden" name="return_limit" value="{{ return_limit }}">
+                    <input type="hidden" name="return_tables_q" value="{{ return_tables_q }}">
 
                     <div class="mb-5">
                         <h1 class="text-xl font-bold tracking-tight text-slate-900">
@@ -101,9 +102,9 @@
 
                             {% set input_type = column_input_type(column) %}
                             {% if input_type == 'textarea' %}
-                            <textarea name="{{ column.name }}" rows="4" class="mono w-full px-3 py-2 border border-slate-300 rounded-lg outline-none focus:ring-1 focus:ring-slate-900 focus:border-slate-900">{{ form_values.get(column.name, '') }}</textarea>
+                            <textarea name="{{ column.name }}" rows="4" class="mono w-full px-3 py-2 border {% if field_errors.get(column.name) %}border-rose-400 bg-rose-50/40{% else %}border-slate-300{% endif %} rounded-lg outline-none focus:ring-1 focus:ring-slate-900 focus:border-slate-900">{{ form_values.get(column.name, '') }}</textarea>
                             {% elif input_type == 'select' or input_type == 'boolean' %}
-                            <select name="{{ column.name }}" class="mono w-full px-3 py-2 border border-slate-300 rounded-lg outline-none focus:ring-1 focus:ring-slate-900 focus:border-slate-900 bg-white">
+                            <select name="{{ column.name }}" class="mono w-full px-3 py-2 border {% if field_errors.get(column.name) %}border-rose-400 bg-rose-50/40{% else %}border-slate-300{% endif %} rounded-lg outline-none focus:ring-1 focus:ring-slate-900 focus:border-slate-900 bg-white">
                                 {% if column.is_nullable %}
                                 <option value="">NULL</option>
                                 {% endif %}
@@ -117,18 +118,21 @@
                                 name="{{ column.name }}"
                                 value="{{ form_values.get(column.name, '') }}"
                                 {% if input_type == 'number' %}step="{{ column_number_step(column) }}"{% endif %}
-                                class="mono w-full px-3 py-2 border border-slate-300 rounded-lg outline-none focus:ring-1 focus:ring-slate-900 focus:border-slate-900"
+                                class="mono w-full px-3 py-2 border {% if field_errors.get(column.name) %}border-rose-400 bg-rose-50/40{% else %}border-slate-300{% endif %} rounded-lg outline-none focus:ring-1 focus:ring-slate-900 focus:border-slate-900"
                             >
+                            {% endif %}
+                            {% if field_errors.get(column.name) %}
+                            <p class="text-[11px] text-rose-600 ml-1">{{ field_errors.get(column.name) }}</p>
                             {% endif %}
                         </div>
                         {% else %}
-                        <div class="text-sm text-slate-400">Нет редактируемых колонок.</div>
+                        <div class="md:col-span-2 text-sm text-slate-500 p-4 border border-slate-200 rounded-xl bg-slate-50">Нет редактируемых колонок.</div>
                         {% endfor %}
                     </div>
 
                     <div class="mt-6 flex items-center justify-between">
-                        <a href="{{ url_for('table_view', db_name=current_db, table_name=current_table) }}" class="px-4 py-2 text-sm text-slate-500 hover:text-slate-900">Отмена</a>
-                        <button type="submit" class="px-5 py-2 bg-slate-950 text-white rounded-lg text-sm font-semibold hover:bg-slate-800">
+                        <a href="{{ url_for('table_view', db_name=current_db, table_name=current_table, page=return_page, limit=return_limit, tables_q=return_tables_q) }}" class="px-4 py-2 text-sm text-slate-500 hover:text-slate-900">Отмена</a>
+                        <button type="submit" data-loading-text="{% if mode == 'create' %}Добавление...{% else %}Сохранение...{% endif %}" class="px-5 py-2 bg-slate-950 text-white rounded-lg text-sm font-semibold hover:bg-slate-800">
                             {% if mode == 'create' %}Добавить строку{% else %}Сохранить изменения{% endif %}
                         </button>
                     </div>
@@ -144,6 +148,21 @@
             </footer>
         </main>
     </div>
+
+    <script>
+        document.querySelectorAll('form[data-loading-form]').forEach((form) => {
+            form.addEventListener('submit', () => {
+                const submitButton = form.querySelector('button[type="submit"]');
+                if (!submitButton) {
+                    return;
+                }
+                submitButton.dataset.originalText = submitButton.textContent;
+                submitButton.textContent = submitButton.getAttribute('data-loading-text') || 'Обработка...';
+                submitButton.disabled = true;
+                submitButton.classList.add('opacity-70', 'cursor-not-allowed');
+            });
+        });
+    </script>
 
 </body>
 </html>

@@ -21,6 +21,9 @@ SYSTEM_DATABASES = {"information_schema", "mysql", "performance_schema", "sys"}
 MAX_SQL_PREVIEW_ROWS = 500
 SQL_HISTORY_LIMIT = 20
 MAX_IDENTIFIER_LENGTH = 128
+DEFAULT_SQL_TIMEOUT_MS = 30000
+MIN_SQL_TIMEOUT_MS = 1000
+MAX_SQL_TIMEOUT_MS = 300000
 
 NUMERIC_DATA_TYPES = {
     "tinyint",
@@ -448,6 +451,48 @@ def coerce_positive_int(value: Any, default: int) -> int:
     return parsed if parsed > 0 else default
 
 
+def coerce_int_in_range(value: Any, default: int, min_value: int, max_value: int) -> int:
+    try:
+        parsed = int(str(value))
+    except (TypeError, ValueError):
+        return default
+    if parsed < min_value:
+        return min_value
+    if parsed > max_value:
+        return max_value
+    return parsed
+
+
+def render_error_page(
+    *,
+    title: str,
+    message: str,
+    status_code: int = 500,
+    back_url: str | None = None,
+) -> tuple[str, int]:
+    return (
+        render_template(
+            "error.html",
+            error_title=title,
+            error_message=message,
+            back_url=back_url,
+            status_code=status_code,
+        ),
+        status_code,
+    )
+
+
+def parse_table_return_state(source: Mapping[str, Any]) -> tuple[int, int, str]:
+    return_page = coerce_positive_int(source.get("return_page") or source.get("page"), 1)
+    return_limit = min(
+        500, coerce_positive_int(source.get("return_limit") or source.get("limit"), 50)
+    )
+    return_tables_q = str(
+        source.get("return_tables_q") or source.get("tables_q") or ""
+    ).strip()
+    return return_page, return_limit, return_tables_q
+
+
 def fetch_row_by_pk(
     conn: pymysql.Connection,
     db_name: str,
@@ -540,16 +585,30 @@ def login() -> Any:
         port_raw = request.form.get("port", "3306").strip() or "3306"
         username = request.form.get("username", "").strip()
         password = request.form.get("password", "")
+        field_errors: dict[str, str] = {}
+
+        if not host:
+            field_errors["host"] = "Укажи сервер."
 
         if not username:
-            flash("Введите пользователя MySQL.", "error")
-            return render_template("login.html", host=host, port=port_raw, username=username)
+            field_errors["username"] = "Введи пользователя MySQL."
 
         try:
             port = int(port_raw)
+            if port <= 0 or port > 65535:
+                field_errors["port"] = "Порт должен быть в диапазоне 1-65535."
         except ValueError:
-            flash("Порт должен быть числом.", "error")
-            return render_template("login.html", host=host, port=port_raw, username=username)
+            field_errors["port"] = "Порт должен быть числом."
+
+        if field_errors:
+            flash("Исправь ошибки в форме.", "error")
+            return render_template(
+                "login.html",
+                host=host,
+                port=port_raw,
+                username=username,
+                field_errors=field_errors,
+            )
 
         try:
             conn = pymysql.connect(
@@ -567,17 +626,30 @@ def login() -> Any:
                 conn.close()
         except Exception as exc:  # pragma: no cover - runtime-specific
             flash(f"Не удалось подключиться: {exc}", "error")
-            return render_template("login.html", host=host, port=port_raw, username=username)
+            return render_template(
+                "login.html",
+                host=host,
+                port=port_raw,
+                username=username,
+                field_errors={},
+            )
 
         session["mysql_host"] = host
         session["mysql_port"] = port
         session["mysql_user"] = username
         session["mysql_password"] = password
         session["server_version"] = version
+        flash("Подключение к MySQL установлено.", "success")
 
         return redirect(url_for("databases"))
 
-    return render_template("login.html", host="127.0.0.1", port="3306", username="")
+    return render_template(
+        "login.html",
+        host="127.0.0.1",
+        port="3306",
+        username="",
+        field_errors={},
+    )
 
 
 @app.route("/logout", methods=["POST"])
@@ -601,8 +673,12 @@ def databases() -> Any:
         finally:
             conn.close()
     except Exception as exc:  # pragma: no cover - runtime-specific
-        flash(f"Ошибка чтения баз данных: {exc}", "error")
-        return redirect(url_for("login"))
+        return render_error_page(
+            title="Ошибка чтения баз данных",
+            message=str(exc),
+            status_code=503,
+            back_url=url_for("login"),
+        )
 
     if filter_query:
         db_items = [item for item in db_items if filter_query in item.name.lower()]
@@ -625,8 +701,12 @@ def create_database() -> Any:
     try:
         conn = mysql_connect()
     except Exception as exc:  # pragma: no cover - runtime-specific
-        flash(f"Ошибка подключения: {exc}", "error")
-        return redirect(url_for("login"))
+        return render_error_page(
+            title="Ошибка подключения к MySQL",
+            message=str(exc),
+            status_code=503,
+            back_url=url_for("login"),
+        )
 
     try:
         db_items = fetch_databases(conn)
@@ -635,28 +715,23 @@ def create_database() -> Any:
         if request.method == "POST":
             database_name = request.form.get("database_name", "").strip()
             collation = request.form.get("collation", "utf8mb4_unicode_ci").strip()
+            field_errors: dict[str, str] = {}
 
             if not safe_database_name(database_name):
-                flash(
-                    "Имя БД не должно быть пустым и не может содержать '/'.",
-                    "error",
-                )
-                return render_template(
-                    "new_database.html",
-                    databases=db_items,
-                    collations=collations,
-                    selected_collation=collation,
-                    database_name=database_name,
-                )
+                field_errors["database_name"] = "Имя БД не должно быть пустым и не может содержать '/'."
 
             if collation not in collations:
-                flash("Выбрана недоступная collation.", "error")
+                field_errors["collation"] = "Выбрана недоступная collation."
+
+            if field_errors:
+                flash("Исправь ошибки в форме.", "error")
                 return render_template(
                     "new_database.html",
                     databases=db_items,
                     collations=collations,
                     selected_collation=collation,
                     database_name=database_name,
+                    field_errors=field_errors,
                 )
 
             with conn.cursor() as cur:
@@ -675,10 +750,15 @@ def create_database() -> Any:
             collations=collations,
             selected_collation="utf8mb4_unicode_ci",
             database_name="",
+            field_errors={},
         )
     except Exception as exc:  # pragma: no cover - runtime-specific
-        flash(f"Ошибка при создании БД: {exc}", "error")
-        return redirect(url_for("databases"))
+        return render_error_page(
+            title="Ошибка создания базы данных",
+            message=str(exc),
+            status_code=500,
+            back_url=url_for("databases"),
+        )
     finally:
         conn.close()
 
@@ -714,8 +794,12 @@ def database_tables(db_name: str) -> Any:
     except HTTPException:
         raise
     except Exception as exc:  # pragma: no cover - runtime-specific
-        flash(f"Ошибка чтения таблиц: {exc}", "error")
-        return redirect(url_for("databases"))
+        return render_error_page(
+            title="Ошибка чтения таблиц",
+            message=str(exc),
+            status_code=500,
+            back_url=url_for("databases"),
+        )
 
     return render_template(
         "tables.html",
@@ -747,6 +831,21 @@ def sql_console(db_name: str) -> Any:
     query_ms: float | None = None
     result_truncated = False
     sql_history = [item for item in get_sql_history() if item["db"] == db_name]
+    timeout_source = (
+        request.form.get("timeout_ms")
+        if request.method == "POST"
+        else request.args.get("timeout_ms", session.get("sql_timeout_ms", DEFAULT_SQL_TIMEOUT_MS))
+    )
+    timeout_ms = coerce_int_in_range(
+        timeout_source,
+        DEFAULT_SQL_TIMEOUT_MS,
+        MIN_SQL_TIMEOUT_MS,
+        MAX_SQL_TIMEOUT_MS,
+    )
+    current_table = request.values.get("table", "").strip()
+    if current_table and not safe_database_name(current_table):
+        current_table = ""
+    return_page, return_limit, tables_q = parse_table_return_state(request.values)
 
     if request.method == "GET":
         history_raw = request.args.get("history")
@@ -757,6 +856,20 @@ def sql_console(db_name: str) -> Any:
                     query_text = sql_history[history_index]["query"]
             except ValueError:
                 pass
+
+    if request.method == "POST":
+        try:
+            requested_timeout = int(str(timeout_source))
+            if requested_timeout != timeout_ms:
+                flash(
+                    f"Таймаут скорректирован до {timeout_ms} ms (допустимо: {MIN_SQL_TIMEOUT_MS}-{MAX_SQL_TIMEOUT_MS}).",
+                    "error",
+                )
+        except (TypeError, ValueError):
+            flash(
+                f"Таймаут должен быть числом. Использовано значение {timeout_ms} ms.",
+                "error",
+            )
 
     try:
         conn = mysql_connect()
@@ -771,38 +884,60 @@ def sql_console(db_name: str) -> Any:
                 if not query_text:
                     flash("Введите SQL-запрос.", "error")
                 else:
-                    start = perf_counter()
-                    with conn.cursor() as cur:
-                        cur.execute(f"USE {quote_identifier(db_name)}")
-                        cur.execute(query_text)
-                        query_ms = (perf_counter() - start) * 1000
+                    try:
+                        start = perf_counter()
+                        with conn.cursor() as cur:
+                            cur.execute(f"USE {quote_identifier(db_name)}")
+                            session["sql_timeout_ms"] = timeout_ms
+                            session.modified = True
+                            # Cross-compatible execution limits: MySQL and MariaDB.
+                            try:
+                                cur.execute("SET SESSION max_execution_time = %s", (timeout_ms,))
+                            except Exception:
+                                pass
+                            try:
+                                cur.execute(
+                                    "SET SESSION max_statement_time = %s",
+                                    (timeout_ms / 1000.0,),
+                                )
+                            except Exception:
+                                pass
+                            cur.execute(query_text)
+                            query_ms = (perf_counter() - start) * 1000
 
-                        if cur.description:
-                            result_columns = [str(column[0]) for column in cur.description]
-                            raw_rows = cur.fetchmany(MAX_SQL_PREVIEW_ROWS)
-                            result_rows = [
-                                [format_cell(row.get(column)) for column in result_columns]
-                                for row in raw_rows
-                            ]
-                            result_count = len(result_rows)
-                            result_truncated = result_count >= MAX_SQL_PREVIEW_ROWS
-                            push_sql_history(db_name, query_text)
-                            sql_history = [item for item in get_sql_history() if item["db"] == db_name]
-                            flash("SQL-запрос выполнен.", "success")
-                        else:
-                            affected_rows = max(cur.rowcount, 0)
-                            push_sql_history(db_name, query_text)
-                            sql_history = [item for item in get_sql_history() if item["db"] == db_name]
-                            flash(
-                                f"SQL-запрос выполнен. Затронуто строк: {affected_rows}.",
-                                "success",
-                            )
+                            if cur.description:
+                                result_columns = [str(column[0]) for column in cur.description]
+                                raw_rows = cur.fetchmany(MAX_SQL_PREVIEW_ROWS)
+                                result_rows = [
+                                    [format_cell(row.get(column)) for column in result_columns]
+                                    for row in raw_rows
+                                ]
+                                result_count = len(result_rows)
+                                result_truncated = result_count >= MAX_SQL_PREVIEW_ROWS
+                                push_sql_history(db_name, query_text)
+                                sql_history = [item for item in get_sql_history() if item["db"] == db_name]
+                                flash("SQL-запрос выполнен.", "success")
+                            else:
+                                affected_rows = max(cur.rowcount, 0)
+                                push_sql_history(db_name, query_text)
+                                sql_history = [item for item in get_sql_history() if item["db"] == db_name]
+                                flash(
+                                    f"SQL-запрос выполнен. Затронуто строк: {affected_rows}.",
+                                    "success",
+                                )
+                    except Exception as exc:
+                        flash(f"Ошибка SQL: {exc}", "error")
         finally:
             conn.close()
     except HTTPException:
         raise
     except Exception as exc:  # pragma: no cover - runtime-specific
-        flash(f"Ошибка выполнения SQL: {exc}", "error")
+        return render_error_page(
+            title="Ошибка выполнения SQL",
+            message=str(exc),
+            status_code=500,
+            back_url=url_for("database_tables", db_name=db_name),
+        )
 
     return render_template(
         "sql_console.html",
@@ -817,6 +952,11 @@ def sql_console(db_name: str) -> Any:
         query_ms=round(query_ms, 2) if query_ms is not None else None,
         result_truncated=result_truncated,
         sql_history=sql_history,
+        timeout_ms=timeout_ms,
+        current_table=current_table,
+        return_page=return_page,
+        return_limit=return_limit,
+        tables_q=tables_q,
     )
 
 
@@ -833,15 +973,31 @@ def table_view(db_name: str, table_name: str) -> Any:
     page_raw = request.args.get("page", "1")
     page = coerce_positive_int(page_raw, 1)
     offset = (page - 1) * limit
+    tables_q = request.args.get("tables_q", "").strip()
 
     try:
         conn = mysql_connect()
         try:
-            if not table_exists(conn, db_name, table_name):
+            if not database_exists(conn, db_name):
                 abort(404)
+            if not table_exists(conn, db_name, table_name):
+                flash(f"Таблица '{table_name}' не найдена.", "error")
+                return redirect(url_for("database_tables", db_name=db_name, q=tables_q))
 
             db_items = fetch_databases(conn)
             table_items = fetch_tables(conn, db_name)
+            sidebar_tables = (
+                [item for item in table_items if tables_q.lower() in item.name.lower()]
+                if tables_q
+                else table_items
+            )
+            if tables_q and not any(item.name == table_name for item in sidebar_tables):
+                current_table_meta = next(
+                    (item for item in table_items if item.name == table_name),
+                    None,
+                )
+                if current_table_meta:
+                    sidebar_tables = [current_table_meta, *sidebar_tables]
             primary_key_columns = fetch_primary_key_columns(conn, db_name, table_name)
 
             start = perf_counter()
@@ -885,14 +1041,19 @@ def table_view(db_name: str, table_name: str) -> Any:
     except HTTPException:
         raise
     except Exception as exc:  # pragma: no cover - runtime-specific
-        flash(f"Ошибка чтения данных таблицы: {exc}", "error")
-        return redirect(url_for("database_tables", db_name=db_name))
+        return render_error_page(
+            title="Ошибка чтения данных таблицы",
+            message=str(exc),
+            status_code=500,
+            back_url=url_for("database_tables", db_name=db_name),
+        )
 
     return render_template(
         "table_view.html",
         databases=db_items,
         current_db=db_name,
         tables=table_items,
+        sidebar_tables=sidebar_tables,
         current_table=table_name,
         columns=columns,
         row_items=row_items,
@@ -905,6 +1066,7 @@ def table_view(db_name: str, table_name: str) -> Any:
         offset=offset,
         rows_from=rows_from,
         rows_to=rows_to,
+        tables_q=tables_q,
         query_ms=round(query_ms, 2),
         estimated_rows=estimated_rows,
         has_primary_key=bool(primary_key_columns),
@@ -918,6 +1080,10 @@ def create_row(db_name: str, table_name: str) -> Any:
 
     if not safe_database_name(db_name) or not safe_database_name(table_name):
         abort(404)
+
+    source_values = request.form if request.method == "POST" else request.args
+    return_page, return_limit, return_tables_q = parse_table_return_state(source_values)
+    field_errors: dict[str, str] = {}
 
     try:
         conn = mysql_connect()
@@ -949,31 +1115,44 @@ def create_row(db_name: str, table_name: str) -> Any:
                     )
                     if value is SKIP_VALUE:
                         continue
+                    if value == "" and not column.is_nullable:
+                        field_errors[column.name] = "Поле обязательно для заполнения."
+                        continue
                     insert_columns.append(column.name)
                     insert_values.append(value)
 
-                with conn.cursor() as cur:
-                    if insert_columns:
-                        columns_sql = ", ".join(
-                            quote_identifier(column) for column in insert_columns
-                        )
-                        placeholders = ", ".join(["%s"] * len(insert_values))
-                        cur.execute(
-                            f"INSERT INTO {quote_identifier(db_name)}."
-                            f"{quote_identifier(table_name)} ({columns_sql}) "
-                            f"VALUES ({placeholders})",
-                            insert_values,
-                        )
-                    else:
-                        cur.execute(
-                            f"INSERT INTO {quote_identifier(db_name)}."
-                            f"{quote_identifier(table_name)} () VALUES ()"
-                        )
+                if field_errors:
+                    flash("Исправь ошибки в форме.", "error")
+                else:
+                    with conn.cursor() as cur:
+                        if insert_columns:
+                            columns_sql = ", ".join(
+                                quote_identifier(column) for column in insert_columns
+                            )
+                            placeholders = ", ".join(["%s"] * len(insert_values))
+                            cur.execute(
+                                f"INSERT INTO {quote_identifier(db_name)}."
+                                f"{quote_identifier(table_name)} ({columns_sql}) "
+                                f"VALUES ({placeholders})",
+                                insert_values,
+                            )
+                        else:
+                            cur.execute(
+                                f"INSERT INTO {quote_identifier(db_name)}."
+                                f"{quote_identifier(table_name)} () VALUES ()"
+                            )
 
-                flash("Строка успешно добавлена.", "success")
-                return redirect(
-                    url_for("table_view", db_name=db_name, table_name=table_name)
-                )
+                    flash("Строка успешно добавлена.", "success")
+                    return redirect(
+                        url_for(
+                            "table_view",
+                            db_name=db_name,
+                            table_name=table_name,
+                            page=return_page,
+                            limit=return_limit,
+                            tables_q=return_tables_q,
+                        )
+                    )
         finally:
             conn.close()
     except HTTPException:
@@ -990,9 +1169,11 @@ def create_row(db_name: str, table_name: str) -> Any:
         mode="create",
         editable_columns=editable_columns if "editable_columns" in locals() else [],
         form_values=form_values if "form_values" in locals() else {},
+        field_errors=field_errors,
         pk_filters=[],
-        return_page=1,
-        return_limit=50,
+        return_page=return_page,
+        return_limit=return_limit,
+        return_tables_q=return_tables_q,
     )
 
 
@@ -1005,8 +1186,8 @@ def edit_row(db_name: str, table_name: str) -> Any:
         abort(404)
 
     source_values = request.form if request.method == "POST" else request.args
-    return_page = coerce_positive_int(source_values.get("return_page"), 1)
-    return_limit = min(500, coerce_positive_int(source_values.get("return_limit"), 50))
+    return_page, return_limit, return_tables_q = parse_table_return_state(source_values)
+    field_errors: dict[str, str] = {}
 
     try:
         conn = mysql_connect()
@@ -1028,6 +1209,7 @@ def edit_row(db_name: str, table_name: str) -> Any:
                         table_name=table_name,
                         page=return_page,
                         limit=return_limit,
+                        tables_q=return_tables_q,
                     )
                 )
 
@@ -1042,6 +1224,7 @@ def edit_row(db_name: str, table_name: str) -> Any:
                         table_name=table_name,
                         page=return_page,
                         limit=return_limit,
+                        tables_q=return_tables_q,
                     )
                 )
 
@@ -1055,6 +1238,7 @@ def edit_row(db_name: str, table_name: str) -> Any:
                         table_name=table_name,
                         page=return_page,
                         limit=return_limit,
+                        tables_q=return_tables_q,
                     )
                 )
 
@@ -1085,10 +1269,15 @@ def edit_row(db_name: str, table_name: str) -> Any:
                     )
                     if value is SKIP_VALUE:
                         continue
+                    if value == "" and not column.is_nullable:
+                        field_errors[column.name] = "Поле обязательно для заполнения."
+                        continue
                     set_fragments.append(f"{quote_identifier(column.name)} = %s")
                     set_values.append(value)
 
-                if not set_fragments:
+                if field_errors:
+                    flash("Исправь ошибки в форме.", "error")
+                elif not set_fragments:
                     flash("Нет полей для обновления.", "error")
                 else:
                     where_sql = " AND ".join(
@@ -1109,6 +1298,7 @@ def edit_row(db_name: str, table_name: str) -> Any:
                             table_name=table_name,
                             page=return_page,
                             limit=return_limit,
+                            tables_q=return_tables_q,
                         )
                     )
         finally:
@@ -1127,9 +1317,11 @@ def edit_row(db_name: str, table_name: str) -> Any:
         mode="edit",
         editable_columns=editable_columns if "editable_columns" in locals() else [],
         form_values=form_values if "form_values" in locals() else {},
+        field_errors=field_errors,
         pk_filters=pk_filters if "pk_filters" in locals() else [],
         return_page=return_page,
         return_limit=return_limit,
+        return_tables_q=return_tables_q,
     )
 
 
@@ -1141,8 +1333,7 @@ def delete_row(db_name: str, table_name: str) -> Any:
     if not safe_database_name(db_name) or not safe_database_name(table_name):
         abort(404)
 
-    return_page = coerce_positive_int(request.form.get("return_page"), 1)
-    return_limit = min(500, coerce_positive_int(request.form.get("return_limit"), 50))
+    return_page, return_limit, return_tables_q = parse_table_return_state(request.form)
 
     try:
         conn = mysql_connect()
@@ -1160,6 +1351,7 @@ def delete_row(db_name: str, table_name: str) -> Any:
                         table_name=table_name,
                         page=return_page,
                         limit=return_limit,
+                        tables_q=return_tables_q,
                     )
                 )
 
@@ -1173,6 +1365,7 @@ def delete_row(db_name: str, table_name: str) -> Any:
                         table_name=table_name,
                         page=return_page,
                         limit=return_limit,
+                        tables_q=return_tables_q,
                     )
                 )
 
@@ -1207,13 +1400,29 @@ def delete_row(db_name: str, table_name: str) -> Any:
             table_name=table_name,
             page=return_page,
             limit=return_limit,
+            tables_q=return_tables_q,
         )
     )
 
 
 @app.errorhandler(404)
 def not_found(_: Any) -> tuple[str, int]:
-    return "Not Found", 404
+    return render_error_page(
+        title="Страница не найдена",
+        message="Запрошенный адрес не существует или был перемещен.",
+        status_code=404,
+        back_url=url_for("index"),
+    )
+
+
+@app.errorhandler(500)
+def internal_server_error(_: Any) -> tuple[str, int]:
+    return render_error_page(
+        title="Внутренняя ошибка приложения",
+        message="Во время обработки запроса произошла непредвиденная ошибка.",
+        status_code=500,
+        back_url=url_for("index"),
+    )
 
 
 if __name__ == "__main__":
