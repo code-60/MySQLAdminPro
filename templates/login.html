@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>phpMyAdmin Pro v1.0 | Авторизация</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdn.jsdelivr.net/npm/remixicon@3.5.0/fonts/remixicon.css" rel="stylesheet">
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono&display=swap');
+        body { font-family: 'Inter', sans-serif; letter-spacing: -0.01em; }
+        .mono { font-family: 'JetBrains Mono', monospace; font-size: 13px; }
+    </style>
+</head>
+<body class="bg-[#fcfcfc] text-slate-900 h-screen flex flex-col justify-between overflow-hidden">
+
+    <main class="flex-1 flex flex-col items-center justify-center px-6">
+        <div class="flex items-center gap-2 mb-10">
+            <span class="font-bold text-2xl tracking-tighter uppercase text-slate-950">{{ host or '127.0.0.1' }}</span>
+            <span class="text-xs bg-slate-200 px-2 py-0.5 rounded font-mono text-slate-700">{{ port or '3306' }}</span>
+        </div>
+
+        <div class="w-full max-w-md bg-white border border-slate-200 rounded-3xl p-10 shadow-xl shadow-slate-100/50 relative">
+            <div class="absolute -top-6 left-1/2 -translate-x-1/2 w-12 h-12 bg-white border-2 border-slate-200 rounded-full flex items-center justify-center text-slate-400 z-10">
+                <i class="ri-git-repository-private-line text-2xl"></i>
+            </div>
+
+            <div class="text-center mb-8 pt-4">
+                <h1 class="text-xl font-bold tracking-tight text-slate-950">phpMyAdmin <span class="text-indigo-600 font-extrabold">Pro</span></h1>
+                <p class="text-sm text-slate-500 mt-1">Версия v1.0 • Система баз данных</p>
+            </div>
+
+            {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+            <div class="space-y-2 mb-4">
+                {% for category, message in messages %}
+                <div class="text-xs px-3 py-2 rounded-xl border {% if category == 'success' %}border-emerald-200 bg-emerald-50 text-emerald-700{% else %}border-rose-200 bg-rose-50 text-rose-700{% endif %}">
+                    {{ message }}
+                </div>
+                {% endfor %}
+            </div>
+            {% endif %}
+            {% endwith %}
+
+            <form class="space-y-5" method="post" action="{{ url_for('login') }}">
+                <div class="grid grid-cols-2 gap-3">
+                    <div>
+                        <label for="host" class="block text-[11px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 ml-1">Сервер</label>
+                        <div class="relative">
+                            <i class="ri-server-line absolute left-3.5 top-3.5 text-slate-400 text-sm"></i>
+                            <input type="text" id="host" name="host" value="{{ host }}" class="w-full pl-11 pr-4 py-3 bg-white border border-slate-300 rounded-xl text-sm focus:border-slate-900 focus:ring-1 focus:ring-slate-900 outline-none transition-all placeholder:text-slate-300">
+                        </div>
+                    </div>
+                    <div>
+                        <label for="port" class="block text-[11px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 ml-1">Порт</label>
+                        <div class="relative">
+                            <i class="ri-plug-line absolute left-3.5 top-3.5 text-slate-400 text-sm"></i>
+                            <input type="text" id="port" name="port" value="{{ port }}" class="w-full pl-11 pr-4 py-3 bg-white border border-slate-300 rounded-xl text-sm focus:border-slate-900 focus:ring-1 focus:ring-slate-900 outline-none transition-all placeholder:text-slate-300">
+                        </div>
+                    </div>
+                </div>
+
+                <div>
+                    <label for="username" class="block text-[11px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 ml-1">Пользователь (MySQL)</label>
+                    <div class="relative">
+                        <i class="ri-user-3-line absolute left-3.5 top-3.5 text-slate-400 text-sm"></i>
+                        <input type="text" id="username" name="username" value="{{ username }}" placeholder="Введите логин..." class="w-full pl-11 pr-4 py-3 bg-white border border-slate-300 rounded-xl text-sm focus:border-slate-900 focus:ring-1 focus:ring-slate-900 outline-none transition-all placeholder:text-slate-300">
+                    </div>
+                </div>
+
+                <div class="pb-1">
+                    <label for="password" class="block text-[11px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 ml-1">Пароль</label>
+                    <div class="relative">
+                        <i class="ri-key-2-line absolute left-3.5 top-3.5 text-slate-400 text-sm"></i>
+                        <input type="password" id="password" name="password" placeholder="•••••••••" class="w-full pl-11 pr-4 py-3 bg-white border border-slate-300 rounded-xl text-sm focus:border-slate-900 focus:ring-1 focus:ring-slate-900 outline-none transition-all placeholder:text-slate-300">
+                    </div>
+                </div>
+
+                <button type="submit" class="w-full py-3.5 bg-slate-950 text-white rounded-xl text-sm font-semibold hover:bg-slate-800 transition-all shadow-lg shadow-slate-200 flex items-center justify-center gap-2">
+                    Войти в систему <i class="ri-arrow-right-line"></i>
+                </button>
+            </form>
+        </div>
+
+        <div class="mt-12 text-[10px] text-slate-400 uppercase tracking-widest">
+            {{ server_version }} • Flask Local Mode
+        </div>
+    </main>
+
+    <footer class="h-8 bg-slate-900 text-[10px] text-slate-400 px-6 flex items-center justify-center uppercase tracking-widest">
+        © PHPMyADMIN PRO • precision database tools v1.0
+    </footer>
+
+</body>
+</html>

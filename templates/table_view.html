@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>phpMyAdmin Pro v1.0 | {{ current_db }}.{{ current_table }}</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono&display=swap');
+        body { font-family: 'Inter', sans-serif; letter-spacing: -0.01em; }
+        .mono { font-family: 'JetBrains Mono', monospace; font-size: 13px; }
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 10px; }
+    </style>
+</head>
+<body class="bg-white text-slate-900">
+
+    <div class="flex h-screen overflow-hidden">
+        <aside class="w-64 bg-slate-50 border-r border-slate-200 flex flex-col">
+            <div class="p-4 border-b border-slate-200 flex items-center justify-between">
+                <span class="font-bold text-sm tracking-tight uppercase">{{ mysql_host }}</span>
+                <span class="text-[10px] bg-slate-200 px-1.5 py-0.5 rounded font-mono">{{ mysql_port }}</span>
+            </div>
+
+            <div class="p-3">
+                <a href="{{ url_for('database_tables', db_name=current_db) }}" class="w-full inline-flex justify-center bg-white border border-slate-300 rounded px-3 py-1.5 text-xs hover:border-slate-900 transition-colors">К таблицам</a>
+            </div>
+
+            <nav class="flex-1 overflow-y-auto text-sm">
+                <div class="px-4 py-1 text-[11px] font-semibold text-slate-400 uppercase mt-2">Databases</div>
+                {% for db in databases %}
+                <details {% if db.name == current_db %}open{% endif %} class="group">
+                    <summary class="flex items-center gap-2 px-4 py-2 hover:bg-slate-200 cursor-pointer list-none transition-colors">
+                        <svg class="w-3 h-3 text-slate-400 group-open:rotate-90 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="9 5l7 7-7 7"></path></svg>
+                        <span class="font-medium {% if db.name == current_db %}text-indigo-700{% endif %}">{{ db.name }}</span>
+                    </summary>
+                    {% if db.name == current_db %}
+                    <div class="ml-4 border-l border-slate-200">
+                        {% for table in tables %}
+                        <a href="{{ url_for('table_view', db_name=current_db, table_name=table.name) }}" class="block px-6 py-1.5 text-xs {% if table.name == current_table %}text-indigo-600 bg-indigo-50 border-indigo-600{% else %}text-slate-600 hover:text-indigo-600 hover:bg-indigo-50 border-transparent{% endif %} border-l-2 transition-all">{{ table.name }}</a>
+                        {% endfor %}
+                    </div>
+                    {% endif %}
+                </details>
+                {% endfor %}
+            </nav>
+        </aside>
+
+        <main class="flex-1 flex flex-col">
+            <header class="h-12 border-b border-slate-200 flex items-center justify-between px-6 bg-white">
+                <div class="flex items-center gap-4">
+                    <div class="flex items-center gap-2 text-xs">
+                        <span class="text-slate-400 font-mono">DB:</span>
+                        <span class="font-semibold">{{ current_db }}</span>
+                    </div>
+                    <div class="h-4 w-[1px] bg-slate-200"></div>
+                    <div class="flex gap-1">
+                        <button class="px-3 py-1 text-xs font-medium bg-slate-900 text-white rounded">Обзор</button>
+                    </div>
+                </div>
+                <div class="flex items-center gap-3">
+                    <a href="{{ url_for('database_tables', db_name=current_db) }}" class="text-xs text-indigo-600 font-medium hover:underline">К таблицам</a>
+                    <form method="post" action="{{ url_for('logout') }}">
+                        <button class="text-xs text-slate-400 hover:text-slate-900">Выход</button>
+                    </form>
+                </div>
+            </header>
+
+            <div class="flex-1 overflow-auto p-6 bg-[#fcfcfc]">
+                {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
+                <div class="space-y-2 mb-6">
+                    {% for category, message in messages %}
+                    <div class="text-xs px-3 py-2 rounded-xl border {% if category == 'success' %}border-emerald-200 bg-emerald-50 text-emerald-700{% else %}border-rose-200 bg-rose-50 text-rose-700{% endif %}">
+                        {{ message }}
+                    </div>
+                    {% endfor %}
+                </div>
+                {% endif %}
+                {% endwith %}
+
+                <div class="mb-4 flex items-center justify-between bg-white border border-slate-200 rounded-md px-4 py-2 shadow-sm">
+                    <div class="flex items-center gap-3 overflow-x-auto">
+                        <span class="w-2 h-2 rounded-full bg-green-500"></span>
+                        <code class="mono text-slate-600">SELECT * FROM `{{ current_table }}` LIMIT {{ limit }};</code>
+                    </div>
+                    <span class="text-[10px] text-slate-400 font-mono uppercase">{{ query_ms }}ms</span>
+                </div>
+
+                <div class="bg-white border border-slate-200 rounded-md shadow-sm overflow-auto">
+                    <table class="w-full text-left border-collapse">
+                        <thead>
+                            <tr class="bg-slate-50 border-b border-slate-200 text-[11px] font-bold text-slate-500 uppercase tracking-wider">
+                                {% for col in columns %}
+                                <th class="p-3 border-r border-slate-100">{{ col }}</th>
+                                {% endfor %}
+                            </tr>
+                        </thead>
+                        <tbody class="text-sm mono text-slate-700">
+                            {% for row in rows %}
+                            <tr class="border-b border-slate-100 hover:bg-slate-50 group">
+                                {% for value in row %}
+                                <td class="p-3 border-r border-slate-100 {% if value == 'NULL' %}text-slate-400 italic{% endif %}">{{ value }}</td>
+                                {% endfor %}
+                            </tr>
+                            {% else %}
+                            <tr>
+                                <td colspan="{{ columns|length if columns else 1 }}" class="p-6 text-center text-xs text-slate-400">Таблица не содержит строк</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+
+                <div class="mt-4 flex justify-between items-center text-xs text-slate-500">
+                    <div>Показано до {{ limit }} строк. Оценка строк в таблице: {{ estimated_rows }}.</div>
+                    <div class="flex gap-2">
+                        <a href="{{ url_for('table_view', db_name=current_db, table_name=current_table, limit=50) }}" class="px-2 py-1 border border-slate-200 rounded hover:bg-white shadow-sm">50</a>
+                        <a href="{{ url_for('table_view', db_name=current_db, table_name=current_table, limit=100) }}" class="px-2 py-1 border border-slate-200 rounded hover:bg-white shadow-sm">100</a>
+                        <a href="{{ url_for('table_view', db_name=current_db, table_name=current_table, limit=500) }}" class="px-2 py-1 border border-slate-200 rounded hover:bg-white shadow-sm">500</a>
+                    </div>
+                </div>
+            </div>
+
+            <footer class="h-6 bg-slate-900 text-[10px] text-slate-400 px-4 flex items-center justify-between uppercase tracking-widest">
+                <div class="flex gap-4">
+                    <span>Connected: {{ mysql_host }}</span>
+                    <span>DB: {{ current_db }}</span>
+                </div>
+                <div class="text-indigo-400 font-bold italic">phpMyAdmin Pro v1.0</div>
+            </footer>
+        </main>
+    </div>
+
+</body>
+</html>

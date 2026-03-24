@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>phpMyAdmin Pro v1.0 | Создание БД</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdn.jsdelivr.net/npm/remixicon@3.5.0/fonts/remixicon.css" rel="stylesheet">
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono&display=swap');
+        body { font-family: 'Inter', sans-serif; letter-spacing: -0.01em; }
+        .mono { font-family: 'JetBrains Mono', monospace; font-size: 13px; }
+    </style>
+</head>
+<body class="bg-[#fcfcfc] text-slate-900">
+
+    <div class="flex h-screen overflow-hidden">
+        <aside class="w-[260px] bg-slate-50 border-r border-slate-200 flex flex-col z-20 shadow-[-1px_0_1px_rgba(0,0,0,0.05)_inset]">
+            <div class="h-14 p-4 border-b border-slate-200 flex items-center justify-between">
+                <span class="font-bold text-sm tracking-tight uppercase">{{ mysql_host }}</span>
+                <span class="text-[10px] bg-slate-200 px-1.5 py-0.5 rounded font-mono">{{ mysql_port }}</span>
+            </div>
+            <div class="p-3">
+                <a href="{{ url_for('databases') }}" class="w-full inline-flex justify-center bg-white border border-slate-300 rounded px-3 py-1.5 text-xs hover:border-slate-900 transition-colors">К списку БД</a>
+            </div>
+            <nav class="flex-1 overflow-y-auto text-sm px-2">
+                <div class="px-2 py-1 text-[11px] font-semibold text-slate-400 uppercase mt-2 font-bold tracking-widest">Databases</div>
+                <div class="mt-1 space-y-0.5">
+                    {% for db in databases %}
+                    <a href="{{ url_for('database_tables', db_name=db.name) }}" class="flex items-center gap-2 px-2 py-2 hover:bg-slate-200 transition-colors rounded-lg {% if db.is_system %}text-slate-400{% else %}text-slate-600{% endif %}">
+                        <i class="ri-database-2-line text-slate-400"></i> {{ db.name }}
+                    </a>
+                    {% endfor %}
+                </div>
+            </nav>
+        </aside>
+
+        <main class="flex-1 flex flex-col bg-white">
+            <header class="h-14 border-b border-slate-200 flex items-center justify-between px-6 bg-white z-10 sticky top-0">
+                <div class="flex items-center gap-4">
+                    <a href="{{ url_for('databases') }}" class="p-1.5 hover:bg-slate-100 rounded-lg text-slate-400 transition-colors">
+                        <i class="ri-arrow-left-line"></i>
+                    </a>
+                    <div class="h-4 w-[1px] bg-slate-200"></div>
+                    <div class="flex items-center gap-2 text-xs">
+                        <span class="text-slate-400 font-mono">Action:</span>
+                        <span class="font-bold text-slate-900 uppercase tracking-tighter">Create Database</span>
+                    </div>
+                </div>
+                <form method="post" action="{{ url_for('logout') }}">
+                    <button class="text-xs text-slate-400 hover:text-slate-900">Выход</button>
+                </form>
+            </header>
+
+            <div class="flex-1 overflow-auto p-12 flex flex-col items-center">
+                <div class="w-full max-w-2xl">
+                    {% with messages = get_flashed_messages(with_categories=true) %}
+                    {% if messages %}
+                    <div class="space-y-2 mb-6">
+                        {% for category, message in messages %}
+                        <div class="text-xs px-3 py-2 rounded-xl border {% if category == 'success' %}border-emerald-200 bg-emerald-50 text-emerald-700{% else %}border-rose-200 bg-rose-50 text-rose-700{% endif %}">
+                            {{ message }}
+                        </div>
+                        {% endfor %}
+                    </div>
+                    {% endif %}
+                    {% endwith %}
+
+                    <div class="mb-10 text-center">
+                        <div class="w-14 h-14 bg-slate-950 text-white rounded-2xl flex items-center justify-center text-2xl mx-auto mb-4 shadow-xl shadow-slate-200">
+                            <i class="ri-add-line"></i>
+                        </div>
+                        <h1 class="text-2xl font-bold tracking-tight text-slate-900">Новая база данных</h1>
+                        <p class="text-sm text-slate-500 mt-1">Создайте новое хранилище на сервере <span class="mono text-slate-900 font-bold">{{ mysql_host }}</span></p>
+                    </div>
+
+                    <form method="post" action="{{ url_for('create_database') }}" class="bg-white border border-slate-200 rounded-3xl p-8 shadow-sm">
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+                            <div class="space-y-2">
+                                <label class="block text-[11px] font-bold text-slate-400 uppercase tracking-widest ml-1">Имя базы данных</label>
+                                <div class="relative">
+                                    <i class="ri-database-2-line absolute left-3.5 top-3.5 text-slate-400 text-sm"></i>
+                                    <input type="text" name="database_name" value="{{ database_name }}" placeholder="Напр. code60_new_db" class="w-full pl-11 pr-4 py-3 bg-white border border-slate-300 rounded-xl text-sm focus:border-slate-950 focus:ring-1 focus:ring-slate-950 outline-none transition-all placeholder:text-slate-300">
+                                </div>
+                            </div>
+
+                            <div class="space-y-2">
+                                <label class="block text-[11px] font-bold text-slate-400 uppercase tracking-widest ml-1">Кодировка (Collation)</label>
+                                <div class="relative">
+                                    <i class="ri-global-line absolute left-3.5 top-3.5 text-slate-400 text-sm"></i>
+                                    <select name="collation" class="w-full pl-11 pr-10 py-3 bg-white border border-slate-300 rounded-xl text-sm appearance-none focus:border-slate-950 focus:ring-1 focus:ring-slate-950 outline-none transition-all cursor-pointer">
+                                        {% for collation in collations %}
+                                        <option value="{{ collation }}" {% if collation == selected_collation %}selected{% endif %}>{{ collation }}{% if collation == 'utf8mb4_unicode_ci' %} (Recommended){% endif %}</option>
+                                        {% endfor %}
+                                    </select>
+                                    <i class="ri-arrow-down-s-line absolute right-4 top-3.5 text-slate-400 pointer-events-none"></i>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="flex items-start gap-4 p-4 bg-blue-50/50 border border-blue-100 rounded-2xl mb-8">
+                            <i class="ri-information-line text-blue-500 mt-0.5"></i>
+                            <p class="text-[12px] text-blue-700 leading-relaxed">
+                                Рекомендуется использовать <span class="font-bold">utf8mb4</span> для полной поддержки спецсимволов.
+                            </p>
+                        </div>
+
+                        <div class="flex items-center justify-between">
+                            <a href="{{ url_for('databases') }}" class="px-6 py-2.5 text-sm font-semibold text-slate-400 hover:text-slate-900 transition-colors">Отмена</a>
+                            <button type="submit" class="px-10 py-3 bg-slate-950 text-white rounded-xl text-sm font-semibold hover:bg-slate-800 transition-all shadow-lg shadow-slate-200">Создать базу</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+            <footer class="h-8 bg-slate-900 text-[10px] text-slate-400 px-6 flex items-center justify-between uppercase tracking-widest">
+                <div class="flex gap-4">
+                    <span>Server: {{ mysql_host }}</span>
+                    <span>User: {{ mysql_user }}</span>
+                </div>
+                <div class="text-indigo-400 font-bold italic">phpMyAdmin Pro v1.0</div>
+            </footer>
+        </main>
+    </div>
+
+</body>
+</html>

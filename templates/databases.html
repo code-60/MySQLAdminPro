@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>phpMyAdmin Pro v1.0 | Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdn.jsdelivr.net/npm/remixicon@3.5.0/fonts/remixicon.css" rel="stylesheet">
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono&display=swap');
+        body { font-family: 'Inter', sans-serif; letter-spacing: -0.01em; }
+        .mono { font-family: 'JetBrains Mono', monospace; font-size: 13px; }
+        ::-webkit-scrollbar { width: 5px; height: 5px; }
+        ::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 10px; }
+    </style>
+</head>
+<body class="bg-[#fcfcfc] text-slate-900">
+
+    <div class="flex h-screen overflow-hidden">
+        <aside class="w-[260px] bg-slate-50 border-r border-slate-200 flex flex-col z-20 shadow-[-1px_0_1px_rgba(0,0,0,0.05)_inset]">
+            <div class="h-14 p-4 border-b border-slate-200 flex items-center justify-between">
+                <span class="font-bold text-sm tracking-tight uppercase">{{ mysql_host }}</span>
+                <span class="text-[10px] bg-slate-200 px-1.5 py-0.5 rounded font-mono">{{ mysql_port }}</span>
+            </div>
+            <div class="p-3">
+                <form method="get" action="{{ url_for('databases') }}">
+                    <input type="text" name="q" value="{{ filter_query }}" placeholder="Фильтр баз..." class="w-full bg-white border border-slate-300 rounded px-3 py-1.5 text-xs focus:outline-none focus:border-indigo-500 transition-colors">
+                </form>
+            </div>
+            <nav class="flex-1 overflow-y-auto text-sm px-2">
+                <div class="px-2 py-1 text-[11px] font-semibold text-slate-400 uppercase mt-2">Databases</div>
+                <div class="mt-1 space-y-0.5">
+                    {% for db in databases %}
+                    <a href="{{ url_for('database_tables', db_name=db.name) }}" class="flex items-center gap-2 px-2 py-2 hover:bg-slate-200 transition-colors rounded-lg {% if db.is_system %}text-slate-400{% else %}text-slate-600{% endif %}">
+                        <i class="ri-database-2-line text-slate-400"></i> {{ db.name }}
+                    </a>
+                    {% else %}
+                    <div class="px-2 py-2 text-xs text-slate-400">Ничего не найдено</div>
+                    {% endfor %}
+                </div>
+            </nav>
+        </aside>
+
+        <main class="flex-1 flex flex-col bg-white">
+            <header class="h-14 border-b border-slate-200 flex items-center justify-between px-6 bg-white z-10 sticky top-0">
+                <div class="flex items-center gap-4">
+                    <div class="flex items-center gap-2 text-xs">
+                        <span class="text-slate-400 font-mono">Server:</span>
+                        <span class="font-bold text-slate-900">{{ mysql_host }}</span>
+                    </div>
+                    <div class="h-4 w-[1px] bg-slate-200"></div>
+                    <div class="flex gap-1">
+                        <button class="px-3 py-1 text-xs font-medium bg-slate-900 text-white rounded">Databases</button>
+                    </div>
+                </div>
+                <div class="flex items-center gap-4">
+                    <a href="{{ url_for('create_database') }}" class="text-xs text-indigo-600 font-medium hover:underline">+ Создать БД</a>
+                    <form method="post" action="{{ url_for('logout') }}">
+                        <button class="text-xs text-slate-400 hover:text-slate-900">Выход</button>
+                    </form>
+                </div>
+            </header>
+
+            <div class="flex-1 overflow-auto p-8 max-w-5xl w-full">
+                {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
+                <div class="space-y-2 mb-6">
+                    {% for category, message in messages %}
+                    <div class="text-xs px-3 py-2 rounded-xl border {% if category == 'success' %}border-emerald-200 bg-emerald-50 text-emerald-700{% else %}border-rose-200 bg-rose-50 text-rose-700{% endif %}">
+                        {{ message }}
+                    </div>
+                    {% endfor %}
+                </div>
+                {% endif %}
+                {% endwith %}
+
+                <div class="mb-10">
+                    <h1 class="text-2xl font-bold tracking-tight text-slate-900">Выбор базы данных</h1>
+                    <p class="text-sm text-slate-500 mt-1">Всего найдено баз данных: <span class="mono font-bold text-slate-700">{{ total_databases }}</span></p>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {% for db in databases %}
+                    <a href="{{ url_for('database_tables', db_name=db.name) }}" class="group border border-slate-200 rounded-xl p-5 hover:border-slate-900 transition-all cursor-pointer bg-white shadow-sm flex flex-col justify-between h-36 {% if db.is_system %}opacity-80{% endif %}">
+                        <div class="flex justify-between items-start">
+                            <div class="flex items-center gap-3">
+                                <div class="w-10 h-10 {% if db.is_system %}bg-slate-100 text-slate-400{% else %}bg-slate-900 text-white{% endif %} rounded-lg flex items-center justify-center text-xl shadow-lg shadow-slate-200">
+                                    <i class="ri-database-2-{% if db.is_system %}line{% else %}fill{% endif %}"></i>
+                                </div>
+                                <div>
+                                    <h3 class="font-bold text-slate-900 text-lg">{{ db.name }}</h3>
+                                    <span class="text-[10px] font-mono bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded border border-blue-100 uppercase">{{ db.collation or 'n/a' }}</span>
+                                </div>
+                            </div>
+                            <i class="ri-arrow-right-up-line text-slate-300 group-hover:text-slate-900 transition-colors text-xl"></i>
+                        </div>
+                        <div class="flex items-center gap-4 text-[11px] font-bold text-slate-400 uppercase tracking-widest border-t border-slate-50 pt-3">
+                            <span>{{ db.table_count }} Таблиц</span>
+                            <span class="w-1 h-1 bg-slate-300 rounded-full"></span>
+                            <span>{{ '%.2f'|format(db.size_mb) }} MB</span>
+                        </div>
+                    </a>
+                    {% endfor %}
+
+                    <a href="{{ url_for('create_database') }}" class="border border-slate-200 border-dashed rounded-xl p-5 flex items-center justify-center hover:bg-slate-50 hover:border-slate-400 transition-all cursor-pointer group">
+                        <div class="flex items-center gap-2 text-slate-400 group-hover:text-slate-900 transition-colors">
+                            <i class="ri-add-circle-line text-lg"></i>
+                            <span class="text-xs font-bold uppercase tracking-wider">Создать новую базу</span>
+                        </div>
+                    </a>
+                </div>
+
+                <div class="mt-12 p-6 border border-slate-200 rounded-xl bg-slate-50/30 flex justify-between items-center">
+                    <div class="space-y-1">
+                        <p class="text-[10px] font-bold text-slate-400 uppercase tracking-tighter">Информация о сервере</p>
+                        <p class="text-xs text-slate-600 font-medium">{{ server_version }} • Flask 3.x</p>
+                    </div>
+                    <div class="text-right space-y-1">
+                        <p class="text-[10px] font-bold text-slate-400 uppercase tracking-tighter">Uptime</p>
+                        <p class="text-xs text-slate-600 font-medium font-mono">{{ uptime }}</p>
+                    </div>
+                </div>
+
+            </div>
+
+            <footer class="h-8 bg-slate-900 text-[10px] text-slate-400 px-6 flex items-center justify-between uppercase tracking-widest">
+                <div class="flex gap-4">
+                    <span>Connected: {{ mysql_host }}</span>
+                    <span>User: {{ mysql_user }}</span>
+                </div>
+                <div class="text-indigo-400 font-bold italic">phpMyAdmin Pro v1.0</div>
+            </footer>
+        </main>
+    </div>
+
+</body>
+</html>
