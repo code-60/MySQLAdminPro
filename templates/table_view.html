@@ -21,8 +21,9 @@
                 <span class="text-[10px] bg-slate-200 px-1.5 py-0.5 rounded font-mono">{{ mysql_port }}</span>
             </div>
 
-            <div class="p-3">
+            <div class="p-3 space-y-2">
                 <a href="{{ url_for('database_tables', db_name=current_db) }}" class="w-full inline-flex justify-center bg-white border border-slate-300 rounded px-3 py-1.5 text-xs hover:border-slate-900 transition-colors">К таблицам</a>
+                <a href="{{ url_for('sql_console', db_name=current_db) }}" class="w-full inline-flex justify-center bg-white border border-slate-300 rounded px-3 py-1.5 text-xs hover:border-slate-900 transition-colors">SQL Console</a>
             </div>
 
             <nav class="flex-1 overflow-y-auto text-sm">
@@ -55,10 +56,11 @@
                     <div class="h-4 w-[1px] bg-slate-200"></div>
                     <div class="flex gap-1">
                         <button class="px-3 py-1 text-xs font-medium bg-slate-900 text-white rounded">Обзор</button>
+                        <a href="{{ url_for('sql_console', db_name=current_db) }}" class="px-3 py-1 text-xs font-medium text-slate-500 hover:bg-slate-100 rounded">SQL</a>
                     </div>
                 </div>
                 <div class="flex items-center gap-3">
-                    <a href="{{ url_for('database_tables', db_name=current_db) }}" class="text-xs text-indigo-600 font-medium hover:underline">К таблицам</a>
+                    <a href="{{ url_for('create_row', db_name=current_db, table_name=current_table) }}" class="text-xs text-indigo-600 font-medium hover:underline">+ Добавить строку</a>
                     <form method="post" action="{{ url_for('logout') }}">
                         <button class="text-xs text-slate-400 hover:text-slate-900">Выход</button>
                     </form>
@@ -93,18 +95,37 @@
                                 {% for col in columns %}
                                 <th class="p-3 border-r border-slate-100">{{ col }}</th>
                                 {% endfor %}
+                                <th class="p-3">Действия</th>
                             </tr>
                         </thead>
                         <tbody class="text-sm mono text-slate-700">
-                            {% for row in rows %}
+                            {% for row in row_items %}
                             <tr class="border-b border-slate-100 hover:bg-slate-50 group">
-                                {% for value in row %}
+                                {% for value in row.cells %}
                                 <td class="p-3 border-r border-slate-100 {% if value == 'NULL' %}text-slate-400 italic{% endif %}">{{ value }}</td>
                                 {% endfor %}
+                                <td class="p-3 whitespace-nowrap font-sans">
+                                    {% if has_primary_key and row.has_pk_values %}
+                                    <form method="get" action="{{ url_for('edit_row', db_name=current_db, table_name=current_table) }}" class="inline">
+                                        {% for pk in row.pk_items %}
+                                        <input type="hidden" name="pk_{{ pk.name }}" value="{{ pk.value }}">
+                                        {% endfor %}
+                                        <button type="submit" class="p-1.5 px-2.5 bg-blue-50 text-blue-700 text-xs font-bold rounded-lg hover:bg-blue-100">Редактировать</button>
+                                    </form>
+                                    <form method="post" action="{{ url_for('delete_row', db_name=current_db, table_name=current_table) }}" class="inline" onsubmit="return confirm('Удалить эту строку?');">
+                                        {% for pk in row.pk_items %}
+                                        <input type="hidden" name="pk_{{ pk.name }}" value="{{ pk.value }}">
+                                        {% endfor %}
+                                        <button type="submit" class="p-1.5 px-2.5 bg-rose-50 text-rose-700 text-xs font-bold rounded-lg hover:bg-rose-100">Удалить</button>
+                                    </form>
+                                    {% else %}
+                                    <span class="text-xs text-slate-400">Нет PK</span>
+                                    {% endif %}
+                                </td>
                             </tr>
                             {% else %}
                             <tr>
-                                <td colspan="{{ columns|length if columns else 1 }}" class="p-6 text-center text-xs text-slate-400">Таблица не содержит строк</td>
+                                <td colspan="{{ (columns|length) + 1 if columns else 2 }}" class="p-6 text-center text-xs text-slate-400">Таблица не содержит строк</td>
                             </tr>
                             {% endfor %}
                         </tbody>
@@ -112,7 +133,10 @@
                 </div>
 
                 <div class="mt-4 flex justify-between items-center text-xs text-slate-500">
-                    <div>Показано до {{ limit }} строк. Оценка строк в таблице: {{ estimated_rows }}.</div>
+                    <div>
+                        Показано до {{ limit }} строк. Оценка строк в таблице: {{ estimated_rows }}.
+                        {% if not has_primary_key %}<span class="text-rose-500">Для Edit/Delete нужен PRIMARY KEY.</span>{% endif %}
+                    </div>
                     <div class="flex gap-2">
                         <a href="{{ url_for('table_view', db_name=current_db, table_name=current_table, limit=50) }}" class="px-2 py-1 border border-slate-200 rounded hover:bg-white shadow-sm">50</a>
                         <a href="{{ url_for('table_view', db_name=current_db, table_name=current_table, limit=100) }}" class="px-2 py-1 border border-slate-200 rounded hover:bg-white shadow-sm">100</a>

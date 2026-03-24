@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>phpMyAdmin Pro v1.0 | {% if mode == 'create' %}Новая строка{% else %}Редактирование строки{% endif %}</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono&display=swap');
+        body { font-family: 'Inter', sans-serif; letter-spacing: -0.01em; }
+        .mono { font-family: 'JetBrains Mono', monospace; font-size: 13px; }
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 10px; }
+    </style>
+</head>
+<body class="bg-[#fcfcfc] text-slate-900">
+
+    <div class="flex h-screen overflow-hidden">
+        <aside class="w-[260px] bg-slate-50 border-r border-slate-200 flex flex-col z-20 shadow-[-1px_0_1px_rgba(0,0,0,0.05)_inset]">
+            <div class="h-14 p-4 border-b border-slate-200 flex items-center justify-between">
+                <span class="font-bold text-sm tracking-tight uppercase">{{ mysql_host }}</span>
+                <span class="text-[10px] bg-slate-200 px-1.5 py-0.5 rounded font-mono">{{ mysql_port }}</span>
+            </div>
+            <div class="p-3 space-y-2">
+                <a href="{{ url_for('table_view', db_name=current_db, table_name=current_table) }}" class="w-full inline-flex justify-center bg-white border border-slate-300 rounded px-3 py-1.5 text-xs hover:border-slate-900 transition-colors">К таблице</a>
+                <a href="{{ url_for('sql_console', db_name=current_db) }}" class="w-full inline-flex justify-center bg-white border border-slate-300 rounded px-3 py-1.5 text-xs hover:border-slate-900 transition-colors">SQL Console</a>
+            </div>
+            <nav class="flex-1 overflow-y-auto text-sm px-2">
+                <div class="px-2 py-1 text-[11px] font-semibold text-slate-400 uppercase mt-2">Databases</div>
+                {% for db in databases %}
+                <a href="{{ url_for('database_tables', db_name=db.name) }}" class="mt-1 flex items-center gap-2 px-2 py-2 hover:bg-slate-200 cursor-pointer transition-colors rounded-lg {% if db.name == current_db %}bg-indigo-50 text-indigo-700{% elif db.is_system %}text-slate-400{% else %}text-slate-700{% endif %}">
+                    <span class="font-medium">{{ db.name }}</span>
+                </a>
+                {% endfor %}
+            </nav>
+        </aside>
+
+        <main class="flex-1 flex flex-col bg-white">
+            <header class="h-14 border-b border-slate-200 flex items-center justify-between px-6 bg-white z-10 sticky top-0">
+                <div class="flex items-center gap-4">
+                    <div class="flex items-center gap-2 text-xs">
+                        <span class="text-slate-400 font-mono">Table:</span>
+                        <span class="font-bold text-slate-900">{{ current_db }}.{{ current_table }}</span>
+                    </div>
+                    <div class="h-4 w-[1px] bg-slate-200"></div>
+                    <div class="flex gap-1">
+                        <button class="px-3 py-1 text-xs font-medium bg-slate-900 text-white rounded">
+                            {% if mode == 'create' %}Новая строка{% else %}Редактирование{% endif %}
+                        </button>
+                    </div>
+                </div>
+                <form method="post" action="{{ url_for('logout') }}">
+                    <button class="text-xs text-slate-400 hover:text-slate-900">Выход</button>
+                </form>
+            </header>
+
+            <div class="flex-1 overflow-auto p-8 bg-[#fcfcfc]">
+                {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
+                <div class="space-y-2 mb-6">
+                    {% for category, message in messages %}
+                    <div class="text-xs px-3 py-2 rounded-xl border {% if category == 'success' %}border-emerald-200 bg-emerald-50 text-emerald-700{% else %}border-rose-200 bg-rose-50 text-rose-700{% endif %}">
+                        {{ message }}
+                    </div>
+                    {% endfor %}
+                </div>
+                {% endif %}
+                {% endwith %}
+
+                <form method="post" action="{% if mode == 'create' %}{{ url_for('create_row', db_name=current_db, table_name=current_table) }}{% else %}{{ url_for('edit_row', db_name=current_db, table_name=current_table) }}{% endif %}" class="max-w-4xl bg-white border border-slate-200 rounded-2xl shadow-sm p-6">
+                    {% if mode == 'edit' %}
+                        {% for pk in pk_filters %}
+                        <input type="hidden" name="pk_{{ pk[0] }}" value="{{ pk[1] }}">
+                        {% endfor %}
+                    {% endif %}
+
+                    <div class="mb-5">
+                        <h1 class="text-xl font-bold tracking-tight text-slate-900">
+                            {% if mode == 'create' %}Добавление новой строки{% else %}Редактирование строки{% endif %}
+                        </h1>
+                        <p class="text-sm text-slate-500 mt-1">Заполняй только нужные поля. Пустые nullable поля сохраняются как `NULL`.</p>
+                    </div>
+
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {% for column in editable_columns %}
+                        <div class="space-y-1.5 {% if column.data_type in ['text','longtext','mediumtext','tinytext','json'] %}md:col-span-2{% endif %}">
+                            <label class="block text-[11px] font-bold text-slate-400 uppercase tracking-widest ml-1">
+                                {{ column.name }}
+                                <span class="normal-case font-medium tracking-normal text-slate-300">({{ column.column_type }})</span>
+                                {% if column.is_nullable %}<span class="text-emerald-500"> nullable</span>{% endif %}
+                            </label>
+
+                            {% if column.data_type in ['text','longtext','mediumtext','tinytext','json'] %}
+                            <textarea name="{{ column.name }}" rows="4" class="mono w-full px-3 py-2 border border-slate-300 rounded-lg outline-none focus:ring-1 focus:ring-slate-900 focus:border-slate-900">{{ form_values.get(column.name, '') }}</textarea>
+                            {% else %}
+                            <input type="text" name="{{ column.name }}" value="{{ form_values.get(column.name, '') }}" class="mono w-full px-3 py-2 border border-slate-300 rounded-lg outline-none focus:ring-1 focus:ring-slate-900 focus:border-slate-900">
+                            {% endif %}
+                        </div>
+                        {% else %}
+                        <div class="text-sm text-slate-400">Нет редактируемых колонок.</div>
+                        {% endfor %}
+                    </div>
+
+                    <div class="mt-6 flex items-center justify-between">
+                        <a href="{{ url_for('table_view', db_name=current_db, table_name=current_table) }}" class="px-4 py-2 text-sm text-slate-500 hover:text-slate-900">Отмена</a>
+                        <button type="submit" class="px-5 py-2 bg-slate-950 text-white rounded-lg text-sm font-semibold hover:bg-slate-800">
+                            {% if mode == 'create' %}Добавить строку{% else %}Сохранить изменения{% endif %}
+                        </button>
+                    </div>
+                </form>
+            </div>
+
+            <footer class="h-8 bg-slate-900 text-[10px] text-slate-400 px-6 flex items-center justify-between uppercase tracking-widest z-20">
+                <div class="flex gap-4">
+                    <span>Connected: {{ mysql_host }}</span>
+                    <span>DB: {{ current_db }}</span>
+                </div>
+                <div class="text-indigo-400 font-bold italic">phpMyAdmin Pro v1.0</div>
+            </footer>
+        </main>
+    </div>
+
+</body>
+</html>

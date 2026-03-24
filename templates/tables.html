@@ -49,6 +49,7 @@
                     <div class="h-4 w-[1px] bg-slate-200"></div>
                     <div class="flex gap-1">
                         <button class="px-3 py-1 text-xs font-medium bg-slate-900 text-white rounded">Таблицы ({{ total_tables }})</button>
+                        <a href="{{ url_for('sql_console', db_name=current_db) }}" class="px-3 py-1 text-xs font-medium text-slate-500 hover:bg-slate-100 rounded">SQL</a>
                     </div>
                 </div>
                 <div class="flex items-center gap-3">

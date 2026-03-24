@@ -4,6 +4,7 @@ import os
 import re
 import socket
 import webbrowser
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
@@ -18,6 +19,7 @@ from werkzeug.exceptions import HTTPException
 
 SYSTEM_DATABASES = {"information_schema", "mysql", "performance_schema", "sys"}
 IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9_$]+$")
+MAX_SQL_PREVIEW_ROWS = 500
 
 
 @dataclass
@@ -37,6 +39,19 @@ class TableMeta:
     collation: str | None
     size_mb: float
 
+
+@dataclass
+class ColumnMeta:
+    name: str
+    data_type: str
+    column_type: str
+    is_nullable: bool
+    is_primary: bool
+    default: str | None
+    extra: str
+
+
+SKIP_VALUE = object()
 
 load_dotenv()
 
@@ -194,6 +209,116 @@ def fetch_tables(conn: pymysql.Connection, db_name: str) -> list[TableMeta]:
         )
         for row in rows
     ]
+
+
+def fetch_columns_meta(
+    conn: pymysql.Connection, db_name: str, table_name: str
+) -> list[ColumnMeta]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                c.column_name AS name,
+                c.data_type AS data_type,
+                c.column_type AS column_type,
+                c.is_nullable AS is_nullable,
+                c.column_default AS column_default,
+                c.column_key AS column_key,
+                c.extra AS extra
+            FROM information_schema.columns c
+            WHERE c.table_schema = %s AND c.table_name = %s
+            ORDER BY c.ordinal_position
+            """,
+            (db_name, table_name),
+        )
+        rows = cur.fetchall()
+
+    return [
+        ColumnMeta(
+            name=row["name"],
+            data_type=row["data_type"],
+            column_type=row["column_type"],
+            is_nullable=(row["is_nullable"] == "YES"),
+            is_primary=(row.get("column_key") == "PRI"),
+            default=row.get("column_default"),
+            extra=(row.get("extra") or ""),
+        )
+        for row in rows
+    ]
+
+
+def fetch_primary_key_columns(
+    conn: pymysql.Connection, db_name: str, table_name: str
+) -> list[str]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT k.column_name AS column_name
+            FROM information_schema.key_column_usage k
+            WHERE
+                k.table_schema = %s
+                AND k.table_name = %s
+                AND k.constraint_name = 'PRIMARY'
+            ORDER BY k.ordinal_position
+            """,
+            (db_name, table_name),
+        )
+        rows = cur.fetchall()
+    return [str(row["column_name"]) for row in rows]
+
+
+def format_form_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.hex()
+    if isinstance(value, (datetime, date, time, Decimal)):
+        return str(value)
+    return str(value)
+
+
+def normalize_form_value(raw_value: str, column: ColumnMeta, for_insert: bool) -> Any:
+    if raw_value != "":
+        return raw_value
+
+    extra_upper = column.extra.upper()
+    if for_insert and ("AUTO_INCREMENT" in extra_upper or column.default is not None):
+        return SKIP_VALUE
+
+    if "GENERATED" in extra_upper:
+        return SKIP_VALUE
+
+    if column.is_nullable:
+        return None
+
+    return ""
+
+
+def build_pk_filters(pk_columns: list[str], values: Mapping[str, Any]) -> list[tuple[str, Any]] | None:
+    filters: list[tuple[str, Any]] = []
+    for column in pk_columns:
+        key = f"pk_{column}"
+        if key not in values:
+            return None
+        filters.append((column, values[key]))
+    return filters
+
+
+def fetch_row_by_pk(
+    conn: pymysql.Connection,
+    db_name: str,
+    table_name: str,
+    pk_filters: list[tuple[str, Any]],
+) -> dict[str, Any] | None:
+    where_sql = " AND ".join(f"{quote_identifier(column)} = %s" for column, _ in pk_filters)
+    params = [value for _, value in pk_filters]
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT * FROM {quote_identifier(db_name)}.{quote_identifier(table_name)} "
+            f"WHERE {where_sql} LIMIT 1",
+            params,
+        )
+        return cur.fetchone()
 
 
 def database_exists(conn: pymysql.Connection, db_name: str) -> bool:
@@ -457,6 +582,79 @@ def database_tables(db_name: str) -> Any:
     )
 
 
+@app.route("/databases/<db_name>/sql", methods=["GET", "POST"])
+def sql_console(db_name: str) -> Any:
+    if not is_authenticated():
+        return redirect(url_for("login"))
+
+    if not safe_database_name(db_name):
+        abort(404)
+
+    query_text = request.form.get("sql_query", "SELECT NOW();").strip()
+    result_columns: list[str] = []
+    result_rows: list[list[str]] = []
+    result_count = 0
+    affected_rows: int | None = None
+    query_ms: float | None = None
+    result_truncated = False
+
+    try:
+        conn = mysql_connect()
+        try:
+            if not database_exists(conn, db_name):
+                abort(404)
+
+            db_items = fetch_databases(conn)
+            table_items = fetch_tables(conn, db_name)
+
+            if request.method == "POST":
+                if not query_text:
+                    flash("Введите SQL-запрос.", "error")
+                else:
+                    start = perf_counter()
+                    with conn.cursor() as cur:
+                        cur.execute(f"USE {quote_identifier(db_name)}")
+                        cur.execute(query_text)
+                        query_ms = (perf_counter() - start) * 1000
+
+                        if cur.description:
+                            result_columns = [str(column[0]) for column in cur.description]
+                            raw_rows = cur.fetchmany(MAX_SQL_PREVIEW_ROWS)
+                            result_rows = [
+                                [format_cell(row.get(column)) for column in result_columns]
+                                for row in raw_rows
+                            ]
+                            result_count = len(result_rows)
+                            result_truncated = result_count >= MAX_SQL_PREVIEW_ROWS
+                            flash("SQL-запрос выполнен.", "success")
+                        else:
+                            affected_rows = max(cur.rowcount, 0)
+                            flash(
+                                f"SQL-запрос выполнен. Затронуто строк: {affected_rows}.",
+                                "success",
+                            )
+        finally:
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception as exc:  # pragma: no cover - runtime-specific
+        flash(f"Ошибка выполнения SQL: {exc}", "error")
+
+    return render_template(
+        "sql_console.html",
+        databases=db_items if "db_items" in locals() else [],
+        tables=table_items if "table_items" in locals() else [],
+        current_db=db_name,
+        sql_query=query_text,
+        result_columns=result_columns,
+        result_rows=result_rows,
+        result_count=result_count,
+        affected_rows=affected_rows,
+        query_ms=round(query_ms, 2) if query_ms is not None else None,
+        result_truncated=result_truncated,
+    )
+
+
 @app.route("/databases/<db_name>/tables/<table_name>")
 def table_view(db_name: str, table_name: str) -> Any:
     if not is_authenticated():
@@ -479,6 +677,7 @@ def table_view(db_name: str, table_name: str) -> Any:
 
             db_items = fetch_databases(conn)
             table_items = fetch_tables(conn, db_name)
+            primary_key_columns = fetch_primary_key_columns(conn, db_name, table_name)
 
             start = perf_counter()
             with conn.cursor() as cur:
@@ -487,17 +686,29 @@ def table_view(db_name: str, table_name: str) -> Any:
                     f"{quote_identifier(table_name)} LIMIT {limit}"
                 )
                 cur.execute(sql)
-                rows = cur.fetchall()
+                raw_rows = cur.fetchall()
                 query_ms = (perf_counter() - start) * 1000
+                columns: list[str] = (
+                    [str(column[0]) for column in cur.description] if cur.description else []
+                )
 
-            columns: list[str] = list(rows[0].keys()) if rows else []
-            row_values: list[list[str]] = [
-                [format_cell(row.get(col)) for col in columns] for row in rows
-            ]
+            row_items: list[dict[str, Any]] = []
+            for raw_row in raw_rows:
+                row_items.append(
+                    {
+                        "cells": [format_cell(raw_row.get(column)) for column in columns],
+                        "pk_items": [
+                            {"name": column, "value": format_form_value(raw_row.get(column))}
+                            for column in primary_key_columns
+                        ],
+                        "has_pk_values": bool(primary_key_columns)
+                        and all(raw_row.get(column) is not None for column in primary_key_columns),
+                    }
+                )
 
             estimated_rows = next(
                 (t.rows_count for t in table_items if t.name == table_name),
-                len(rows),
+                len(raw_rows),
             )
         finally:
             conn.close()
@@ -514,11 +725,258 @@ def table_view(db_name: str, table_name: str) -> Any:
         tables=table_items,
         current_table=table_name,
         columns=columns,
-        rows=row_values,
+        row_items=row_items,
         limit=limit,
         query_ms=round(query_ms, 2),
         estimated_rows=estimated_rows,
+        has_primary_key=bool(primary_key_columns),
     )
+
+
+@app.route("/databases/<db_name>/tables/<table_name>/rows/new", methods=["GET", "POST"])
+def create_row(db_name: str, table_name: str) -> Any:
+    if not is_authenticated():
+        return redirect(url_for("login"))
+
+    if not safe_database_name(db_name) or not safe_database_name(table_name):
+        abort(404)
+
+    try:
+        conn = mysql_connect()
+        try:
+            if not table_exists(conn, db_name, table_name):
+                abort(404)
+
+            db_items = fetch_databases(conn)
+            table_items = fetch_tables(conn, db_name)
+            columns_meta = fetch_columns_meta(conn, db_name, table_name)
+            editable_columns = [
+                column
+                for column in columns_meta
+                if "GENERATED" not in column.extra.upper()
+            ]
+
+            form_values = {
+                column.name: request.form.get(column.name, "")
+                for column in editable_columns
+            }
+
+            if request.method == "POST":
+                insert_columns: list[str] = []
+                insert_values: list[Any] = []
+
+                for column in editable_columns:
+                    value = normalize_form_value(
+                        form_values[column.name], column, for_insert=True
+                    )
+                    if value is SKIP_VALUE:
+                        continue
+                    insert_columns.append(column.name)
+                    insert_values.append(value)
+
+                with conn.cursor() as cur:
+                    if insert_columns:
+                        columns_sql = ", ".join(
+                            quote_identifier(column) for column in insert_columns
+                        )
+                        placeholders = ", ".join(["%s"] * len(insert_values))
+                        cur.execute(
+                            f"INSERT INTO {quote_identifier(db_name)}."
+                            f"{quote_identifier(table_name)} ({columns_sql}) "
+                            f"VALUES ({placeholders})",
+                            insert_values,
+                        )
+                    else:
+                        cur.execute(
+                            f"INSERT INTO {quote_identifier(db_name)}."
+                            f"{quote_identifier(table_name)} () VALUES ()"
+                        )
+
+                flash("Строка успешно добавлена.", "success")
+                return redirect(
+                    url_for("table_view", db_name=db_name, table_name=table_name)
+                )
+        finally:
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception as exc:  # pragma: no cover - runtime-specific
+        flash(f"Ошибка добавления строки: {exc}", "error")
+
+    return render_template(
+        "row_form.html",
+        databases=db_items if "db_items" in locals() else [],
+        tables=table_items if "table_items" in locals() else [],
+        current_db=db_name,
+        current_table=table_name,
+        mode="create",
+        editable_columns=editable_columns if "editable_columns" in locals() else [],
+        form_values=form_values if "form_values" in locals() else {},
+        pk_filters=[],
+    )
+
+
+@app.route("/databases/<db_name>/tables/<table_name>/rows/edit", methods=["GET", "POST"])
+def edit_row(db_name: str, table_name: str) -> Any:
+    if not is_authenticated():
+        return redirect(url_for("login"))
+
+    if not safe_database_name(db_name) or not safe_database_name(table_name):
+        abort(404)
+
+    try:
+        conn = mysql_connect()
+        try:
+            if not table_exists(conn, db_name, table_name):
+                abort(404)
+
+            db_items = fetch_databases(conn)
+            table_items = fetch_tables(conn, db_name)
+            columns_meta = fetch_columns_meta(conn, db_name, table_name)
+            primary_key_columns = [column.name for column in columns_meta if column.is_primary]
+
+            if not primary_key_columns:
+                flash("Редактирование доступно только для таблиц с PRIMARY KEY.", "error")
+                return redirect(
+                    url_for("table_view", db_name=db_name, table_name=table_name)
+                )
+
+            source_values = request.form if request.method == "POST" else request.args
+            pk_filters = build_pk_filters(primary_key_columns, source_values)
+
+            if not pk_filters:
+                flash("Не удалось определить PRIMARY KEY для выбранной строки.", "error")
+                return redirect(
+                    url_for("table_view", db_name=db_name, table_name=table_name)
+                )
+
+            existing_row = fetch_row_by_pk(conn, db_name, table_name, pk_filters)
+            if not existing_row:
+                flash("Строка не найдена.", "error")
+                return redirect(
+                    url_for("table_view", db_name=db_name, table_name=table_name)
+                )
+
+            editable_columns = [
+                column
+                for column in columns_meta
+                if not column.is_primary and "GENERATED" not in column.extra.upper()
+            ]
+
+            if request.method == "POST":
+                form_values = {
+                    column.name: request.form.get(column.name, "")
+                    for column in editable_columns
+                }
+            else:
+                form_values = {
+                    column.name: format_form_value(existing_row.get(column.name))
+                    for column in editable_columns
+                }
+
+            if request.method == "POST":
+                set_fragments: list[str] = []
+                set_values: list[Any] = []
+
+                for column in editable_columns:
+                    value = normalize_form_value(
+                        form_values[column.name], column, for_insert=False
+                    )
+                    if value is SKIP_VALUE:
+                        continue
+                    set_fragments.append(f"{quote_identifier(column.name)} = %s")
+                    set_values.append(value)
+
+                if not set_fragments:
+                    flash("Нет полей для обновления.", "error")
+                else:
+                    where_sql = " AND ".join(
+                        f"{quote_identifier(column)} = %s" for column, _ in pk_filters
+                    )
+                    where_values = [value for _, value in pk_filters]
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            f"UPDATE {quote_identifier(db_name)}.{quote_identifier(table_name)} "
+                            f"SET {', '.join(set_fragments)} WHERE {where_sql}",
+                            set_values + where_values,
+                        )
+                    flash("Строка успешно обновлена.", "success")
+                    return redirect(
+                        url_for("table_view", db_name=db_name, table_name=table_name)
+                    )
+        finally:
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception as exc:  # pragma: no cover - runtime-specific
+        flash(f"Ошибка обновления строки: {exc}", "error")
+
+    return render_template(
+        "row_form.html",
+        databases=db_items if "db_items" in locals() else [],
+        tables=table_items if "table_items" in locals() else [],
+        current_db=db_name,
+        current_table=table_name,
+        mode="edit",
+        editable_columns=editable_columns if "editable_columns" in locals() else [],
+        form_values=form_values if "form_values" in locals() else {},
+        pk_filters=pk_filters if "pk_filters" in locals() else [],
+    )
+
+
+@app.route("/databases/<db_name>/tables/<table_name>/rows/delete", methods=["POST"])
+def delete_row(db_name: str, table_name: str) -> Any:
+    if not is_authenticated():
+        return redirect(url_for("login"))
+
+    if not safe_database_name(db_name) or not safe_database_name(table_name):
+        abort(404)
+
+    try:
+        conn = mysql_connect()
+        try:
+            if not table_exists(conn, db_name, table_name):
+                abort(404)
+
+            pk_columns = fetch_primary_key_columns(conn, db_name, table_name)
+            if not pk_columns:
+                flash("Удаление доступно только для таблиц с PRIMARY KEY.", "error")
+                return redirect(
+                    url_for("table_view", db_name=db_name, table_name=table_name)
+                )
+
+            pk_filters = build_pk_filters(pk_columns, request.form)
+            if not pk_filters:
+                flash("Не удалось определить PRIMARY KEY для удаления.", "error")
+                return redirect(
+                    url_for("table_view", db_name=db_name, table_name=table_name)
+                )
+
+            where_sql = " AND ".join(
+                f"{quote_identifier(column)} = %s" for column, _ in pk_filters
+            )
+            params = [value for _, value in pk_filters]
+
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"DELETE FROM {quote_identifier(db_name)}.{quote_identifier(table_name)} "
+                    f"WHERE {where_sql} LIMIT 1",
+                    params,
+                )
+                deleted_count = max(cur.rowcount, 0)
+
+            if deleted_count:
+                flash("Строка удалена.", "success")
+            else:
+                flash("Строка не найдена или уже удалена.", "error")
+        finally:
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception as exc:  # pragma: no cover - runtime-specific
+        flash(f"Ошибка удаления строки: {exc}", "error")
+
+    return redirect(url_for("table_view", db_name=db_name, table_name=table_name))
 
 
 @app.errorhandler(404)
