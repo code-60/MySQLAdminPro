@@ -30,6 +30,12 @@ MAX_IDENTIFIER_LENGTH = 128
 DEFAULT_SQL_TIMEOUT_MS = 30000
 MIN_SQL_TIMEOUT_MS = 1000
 MAX_SQL_TIMEOUT_MS = 300000
+DATA_SEARCH_MAX_QUERY_LENGTH = 120
+DATA_SEARCH_MAX_TABLES = 40
+DATA_SEARCH_MAX_COLUMNS_PER_TABLE = 24
+DATA_SEARCH_MAX_ROWS_PER_TABLE = 5
+DATA_SEARCH_MAX_MATCHED_TABLES = 20
+DATA_SEARCH_MAX_TOTAL_ROWS = 100
 CREATE_TABLE_ALLOWED_TYPES = {
     "INT",
     "BIGINT",
@@ -426,6 +432,124 @@ def fetch_tables(conn: pymysql.Connection, db_name: str) -> list[TableMeta]:
         )
         for row in rows
     ]
+
+
+def search_data_across_tables(
+    conn: pymysql.Connection,
+    db_name: str,
+    table_names: list[str],
+    search_text: str,
+) -> tuple[list[dict[str, Any]], int, int, bool]:
+    normalized = search_text.strip()
+    if not normalized:
+        return [], 0, 0, False
+
+    excluded_types = {
+        "binary",
+        "varbinary",
+        "tinyblob",
+        "blob",
+        "mediumblob",
+        "longblob",
+        "geometry",
+        "point",
+        "linestring",
+        "polygon",
+        "multipoint",
+        "multilinestring",
+        "multipolygon",
+        "geometrycollection",
+    }
+    table_name_set = set(table_names)
+    columns_by_table: dict[str, list[str]] = {}
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                c.table_name AS table_name,
+                c.column_name AS column_name,
+                c.data_type AS data_type
+            FROM information_schema.columns c
+            WHERE c.table_schema = %s
+            ORDER BY c.table_name, c.ordinal_position
+            """,
+            (db_name,),
+        )
+        column_rows = cur.fetchall()
+
+        for row in column_rows:
+            table_name = str(row["table_name"])
+            if table_name not in table_name_set:
+                continue
+            data_type = str(row.get("data_type") or "").lower()
+            if data_type in excluded_types:
+                continue
+            columns_by_table.setdefault(table_name, []).append(str(row["column_name"]))
+
+        results: list[dict[str, Any]] = []
+        scanned_tables = 0
+        total_rows = 0
+        limit_hit = False
+        like_value = f"%{normalized}%"
+
+        for table_name in table_names:
+            searchable_columns = columns_by_table.get(table_name, [])
+            if not searchable_columns:
+                continue
+            searchable_columns = searchable_columns[:DATA_SEARCH_MAX_COLUMNS_PER_TABLE]
+
+            if scanned_tables >= DATA_SEARCH_MAX_TABLES:
+                limit_hit = True
+                break
+            scanned_tables += 1
+
+            where_sql = " OR ".join(
+                f"CAST({quote_identifier(column)} AS CHAR) LIKE %s"
+                for column in searchable_columns
+            )
+            sql = (
+                f"SELECT * FROM {quote_identifier(db_name)}.{quote_identifier(table_name)} "
+                f"WHERE {where_sql} LIMIT %s"
+            )
+            params: list[Any] = [like_value] * len(searchable_columns)
+            params.append(DATA_SEARCH_MAX_ROWS_PER_TABLE + 1)
+
+            try:
+                cur.execute(sql, params)
+            except Exception:
+                continue
+
+            raw_rows = cur.fetchall()
+            if not raw_rows:
+                continue
+
+            has_more = len(raw_rows) > DATA_SEARCH_MAX_ROWS_PER_TABLE
+            limited_rows = raw_rows[:DATA_SEARCH_MAX_ROWS_PER_TABLE]
+            result_columns = [str(column[0]) for column in cur.description or []]
+            formatted_rows = [
+                [format_cell(row.get(column)) for column in result_columns]
+                for row in limited_rows
+            ]
+            results.append(
+                {
+                    "table_name": table_name,
+                    "columns": result_columns,
+                    "rows": formatted_rows,
+                    "row_count": len(limited_rows),
+                    "has_more": has_more,
+                }
+            )
+            total_rows += len(limited_rows)
+
+            if (
+                len(results) >= DATA_SEARCH_MAX_MATCHED_TABLES
+                or total_rows >= DATA_SEARCH_MAX_TOTAL_ROWS
+            ):
+                limit_hit = True
+                break
+
+    return results, scanned_tables, total_rows, limit_hit
 
 
 def fetch_columns_meta(
@@ -1530,7 +1654,16 @@ def database_tables(db_name: str) -> Any:
     if not safe_database_name(db_name):
         abort(404)
 
-    filter_query = request.args.get("q", "").strip().lower()
+    filter_query_raw = request.args.get("q", "").strip()
+    filter_query = filter_query_raw.lower()
+    data_search_query_raw = request.args.get("data_q", "").strip()
+    data_search_query = data_search_query_raw[:DATA_SEARCH_MAX_QUERY_LENGTH]
+    data_search_query_trimmed = len(data_search_query_raw) > DATA_SEARCH_MAX_QUERY_LENGTH
+    data_search_results: list[dict[str, Any]] = []
+    data_search_scanned_tables = 0
+    data_search_total_rows = 0
+    data_search_limit_hit = False
+    data_search_ms: float | None = None
 
     try:
         conn = mysql_connect()
@@ -1539,7 +1672,8 @@ def database_tables(db_name: str) -> Any:
                 abort(404)
 
             db_items = fetch_databases(conn)
-            table_items = fetch_tables(conn, db_name)
+            table_items_all = fetch_tables(conn, db_name)
+            table_items = table_items_all
 
             if filter_query:
                 table_items = [
@@ -1548,6 +1682,21 @@ def database_tables(db_name: str) -> Any:
 
             total_rows = sum(t.rows_count for t in table_items)
             total_size = round(sum(t.size_mb for t in table_items), 2)
+
+            if data_search_query:
+                start = perf_counter()
+                (
+                    data_search_results,
+                    data_search_scanned_tables,
+                    data_search_total_rows,
+                    data_search_limit_hit,
+                ) = search_data_across_tables(
+                    conn,
+                    db_name,
+                    [table.name for table in table_items_all],
+                    data_search_query,
+                )
+                data_search_ms = (perf_counter() - start) * 1000
         finally:
             conn.close()
     except HTTPException:
@@ -1568,7 +1717,14 @@ def database_tables(db_name: str) -> Any:
         total_tables=len(table_items),
         total_rows=total_rows,
         total_size=total_size,
-        filter_query=request.args.get("q", ""),
+        filter_query=filter_query_raw,
+        data_search_query=data_search_query,
+        data_search_query_trimmed=data_search_query_trimmed,
+        data_search_results=data_search_results,
+        data_search_scanned_tables=data_search_scanned_tables,
+        data_search_total_rows=data_search_total_rows,
+        data_search_limit_hit=data_search_limit_hit,
+        data_search_ms=round(data_search_ms, 2) if data_search_ms is not None else None,
     )
 
 

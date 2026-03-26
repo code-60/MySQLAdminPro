@@ -34,6 +34,7 @@
 
             <div class="p-3">
                 <form method="get" action="{{ url_for('database_tables', db_name=current_db) }}">
+                    <input type="hidden" name="data_q" value="{{ data_search_query }}">
                     <input type="text" name="q" value="{{ filter_query }}" placeholder="Фильтр таблиц..." class="w-full bg-white border border-slate-300 rounded px-3 py-1.5 text-xs focus:outline-none focus:border-indigo-500 transition-colors">
                 </form>
             </div>
@@ -106,16 +107,80 @@
                     </div>
                 </div>
 
+                <div class="mb-5 bg-white border border-slate-200 rounded-lg shadow-sm p-4">
+                    <div class="flex items-center justify-between gap-3 mb-3">
+                        <p class="text-[11px] font-bold text-slate-400 uppercase tracking-widest">Поиск данных по всем таблицам</p>
+                        <span class="text-[10px] text-slate-400">Лимиты: {{ data_search_scanned_tables }} таблиц проверено, до 5 строк на таблицу</span>
+                    </div>
+
+                    <form method="get" action="{{ url_for('database_tables', db_name=current_db) }}" class="flex flex-wrap items-center gap-2 mb-3">
+                        <input type="hidden" name="q" value="{{ filter_query }}">
+                        <input type="text" name="data_q" value="{{ data_search_query }}" placeholder="Например: user@example.com, tx_hash, order_id" class="mono flex-1 min-w-[280px] px-3 py-2 border border-slate-300 rounded text-xs focus:outline-none focus:border-indigo-500">
+                        <button type="submit" class="px-3 py-2 bg-slate-900 text-white rounded text-xs font-semibold">Искать данные</button>
+                        <a href="{{ url_for('database_tables', db_name=current_db, q=filter_query) }}" class="px-3 py-2 border border-slate-300 rounded text-xs hover:border-slate-900">Сбросить</a>
+                    </form>
+
+                    {% if data_search_query_trimmed %}
+                    <div class="text-xs text-amber-700 mb-2">Запрос обрезан до {{ data_search_query|length }} символов.</div>
+                    {% endif %}
+
+                    {% if data_search_query %}
+                    <div class="mb-3 text-xs text-slate-500">
+                        Найдено превью-строк: {{ data_search_total_rows }}.
+                        {% if data_search_ms is not none %}<span class="mono">Время: {{ data_search_ms }} ms.</span>{% endif %}
+                        {% if data_search_limit_hit %}<span class="text-amber-600">Показан частичный результат из-за лимитов.</span>{% endif %}
+                    </div>
+
+                    {% if data_search_results %}
+                    <div class="space-y-3 max-h-[420px] overflow-y-auto pr-1">
+                        {% for match in data_search_results %}
+                        <div class="border border-slate-200 rounded-lg">
+                            <div class="px-3 py-2 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
+                                <a href="{{ url_for('table_view', db_name=current_db, table_name=match.table_name, tables_q=filter_query) }}" class="text-xs font-bold text-slate-800 hover:text-indigo-700">{{ match.table_name }}</a>
+                                <span class="text-[10px] text-slate-400">Строк показано: {{ match.row_count }}{% if match.has_more %}+{% endif %}</span>
+                            </div>
+                            <div class="data-grid-wrap">
+                                <table class="data-grid text-left border-collapse">
+                                    <thead>
+                                        <tr class="bg-slate-50/50 border-b border-slate-100 text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                                            {% for col in match.columns %}
+                                            <th class="p-2 border-r border-slate-100 min-w-[140px]">{{ col }}</th>
+                                            {% endfor %}
+                                        </tr>
+                                    </thead>
+                                    <tbody class="text-xs mono text-slate-700">
+                                        {% for row in match.rows %}
+                                        <tr class="border-b border-slate-100">
+                                            {% for value in row %}
+                                            <td class="p-2 border-r border-slate-100 whitespace-nowrap {% if value == 'NULL' %}text-slate-400 italic{% endif %}">{{ value }}</td>
+                                            {% endfor %}
+                                        </tr>
+                                        {% endfor %}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    {% else %}
+                    <div class="text-xs text-slate-500">Совпадений не найдено.</div>
+                    {% endif %}
+                    {% else %}
+                    <div class="text-xs text-slate-500">Введи значение и нажми “Искать данные”, чтобы выполнить поиск по строкам всех таблиц базы.</div>
+                    {% endif %}
+                </div>
+
                 <div class="bg-white border border-slate-200 rounded-lg shadow-sm">
                     <div class="p-4 border-b border-slate-100 bg-slate-50/50 flex justify-between items-center">
                         <div class="relative w-64">
                             <i class="ri-filter-3-line absolute left-3 top-2.5 text-slate-400 text-sm"></i>
                             <form method="get" action="{{ url_for('database_tables', db_name=current_db) }}">
+                                <input type="hidden" name="data_q" value="{{ data_search_query }}">
                                 <input type="text" name="q" value="{{ filter_query }}" placeholder="Фильтр по имени таблицы..." class="w-full pl-9 pr-4 py-2 bg-white border border-slate-200 rounded-lg text-xs focus:ring-1 focus:ring-indigo-500 outline-none transition-all">
                             </form>
                         </div>
                         <div class="flex items-center gap-3">
-                            <a href="{{ url_for('database_tables', db_name=current_db) }}" class="text-xs text-slate-500 hover:text-slate-900 transition-colors"><i class="ri-refresh-line"></i></a>
+                            <a href="{{ url_for('database_tables', db_name=current_db, q=filter_query, data_q=data_search_query) }}" class="text-xs text-slate-500 hover:text-slate-900 transition-colors"><i class="ri-refresh-line"></i></a>
                         </div>
                     </div>
 
