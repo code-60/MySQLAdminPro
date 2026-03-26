@@ -67,8 +67,8 @@
 
 - [ ] Multi-tab SQL editor
 - [ ] SQL formatting button
-- [ ] SQL autocomplete (tables/columns)
-- [ ] Explain plan view (`EXPLAIN`)
+- [x] SQL autocomplete (tables/columns)
+- [x] Explain plan view (`EXPLAIN`)
 - [x] Saved query snippets (favorites)
 - [x] Export result set (CSV/JSON)
 - [ ] Query history persistence (file/db, not only session)
