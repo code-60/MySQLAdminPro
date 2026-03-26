@@ -7,6 +7,7 @@ import webbrowser
 import csv
 import io
 import json
+from uuid import uuid4
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
@@ -24,6 +25,7 @@ from werkzeug.exceptions import HTTPException
 SYSTEM_DATABASES = {"information_schema", "mysql", "performance_schema", "sys"}
 MAX_SQL_PREVIEW_ROWS = 500
 SQL_HISTORY_LIMIT = 20
+SQL_SNIPPETS_LIMIT = 30
 MAX_IDENTIFIER_LENGTH = 128
 DEFAULT_SQL_TIMEOUT_MS = 30000
 MIN_SQL_TIMEOUT_MS = 1000
@@ -696,6 +698,93 @@ def push_sql_history(db_name: str, query_text: str) -> None:
     existing = [item for item in get_sql_history() if not (item["db"] == db_name and item["query"] == normalized_query)]
     session["sql_history"] = [new_item] + existing[: SQL_HISTORY_LIMIT - 1]
     session.modified = True
+
+
+def get_sql_snippets() -> list[dict[str, str]]:
+    raw_snippets = session.get("sql_snippets", [])
+    if not isinstance(raw_snippets, list):
+        return []
+
+    normalized: list[dict[str, str]] = []
+    for item in raw_snippets:
+        if not isinstance(item, dict):
+            continue
+
+        snippet_id = str(item.get("id", "")).strip()
+        db_name = str(item.get("db", "")).strip()
+        name = str(item.get("name", "")).strip()
+        query = str(item.get("query", "")).strip()
+        saved_at = str(item.get("saved_at", "")).strip()
+        if not snippet_id or not db_name or not name or not query:
+            continue
+
+        normalized.append(
+            {
+                "id": snippet_id,
+                "db": db_name,
+                "name": name,
+                "query": query,
+                "saved_at": saved_at,
+            }
+        )
+
+    return normalized[:SQL_SNIPPETS_LIMIT]
+
+
+def derive_sql_snippet_name(query_text: str) -> str:
+    compact = " ".join(query_text.strip().split())
+    if not compact:
+        return "Snippet"
+    if len(compact) <= 64:
+        return compact
+    return f"{compact[:61]}..."
+
+
+def save_sql_snippet(db_name: str, snippet_name: str, query_text: str) -> str | None:
+    name = snippet_name.strip() or derive_sql_snippet_name(query_text)
+    if len(name) > 80:
+        name = f"{name[:77]}..."
+
+    normalized_query = query_text.strip()
+    if not normalized_query:
+        return None
+
+    new_item = {
+        "id": uuid4().hex,
+        "db": db_name,
+        "name": name,
+        "query": normalized_query,
+        "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    existing = [
+        item
+        for item in get_sql_snippets()
+        if not (
+            item["db"] == db_name
+            and item["name"].lower() == name.lower()
+        )
+    ]
+    session["sql_snippets"] = [new_item] + existing[: SQL_SNIPPETS_LIMIT - 1]
+    session.modified = True
+    return new_item["id"]
+
+
+def delete_sql_snippet(db_name: str, snippet_id: str) -> bool:
+    normalized_id = snippet_id.strip()
+    if not normalized_id:
+        return False
+
+    existing = get_sql_snippets()
+    filtered = [
+        item
+        for item in existing
+        if not (item["db"] == db_name and item["id"] == normalized_id)
+    ]
+    changed = len(filtered) != len(existing)
+    if changed:
+        session["sql_snippets"] = filtered[:SQL_SNIPPETS_LIMIT]
+        session.modified = True
+    return changed
 
 
 def coerce_positive_int(value: Any, default: int) -> int:
@@ -1505,6 +1594,7 @@ def sql_console(db_name: str) -> Any:
     query_ms: float | None = None
     result_truncated = False
     sql_history = [item for item in get_sql_history() if item["db"] == db_name]
+    sql_snippets = [item for item in get_sql_snippets() if item["db"] == db_name]
     timeout_source = (
         request.form.get("timeout_ms")
         if request.method == "POST"
@@ -1530,6 +1620,15 @@ def sql_console(db_name: str) -> Any:
                     query_text = sql_history[history_index]["query"]
             except ValueError:
                 pass
+
+        snippet_id = request.args.get("snippet_id", "").strip()
+        if snippet_id:
+            selected_snippet = next(
+                (item for item in sql_snippets if item["id"] == snippet_id),
+                None,
+            )
+            if selected_snippet:
+                query_text = selected_snippet["query"]
 
     if request.method == "POST":
         try:
@@ -1679,11 +1778,100 @@ def sql_console(db_name: str) -> Any:
         query_ms=round(query_ms, 2) if query_ms is not None else None,
         result_truncated=result_truncated,
         sql_history=sql_history,
+        sql_snippets=sql_snippets,
         timeout_ms=timeout_ms,
         current_table=current_table,
         return_page=return_page,
         return_limit=return_limit,
         tables_q=tables_q,
+    )
+
+
+@app.route("/databases/<db_name>/sql/snippets/add", methods=["POST"])
+def add_sql_snippet_route(db_name: str) -> Any:
+    if not is_authenticated():
+        return redirect(url_for("login"))
+
+    if not safe_database_name(db_name):
+        abort(404)
+
+    snippet_name = request.form.get("snippet_name", "").strip()
+    snippet_query = request.form.get("snippet_query", "").strip()
+    current_table = request.form.get("table", "").strip()
+    if current_table and not safe_database_name(current_table):
+        current_table = ""
+    return_page, return_limit, tables_q = parse_table_return_state(request.form)
+    timeout_ms = coerce_int_in_range(
+        request.form.get("timeout_ms", session.get("sql_timeout_ms", DEFAULT_SQL_TIMEOUT_MS)),
+        DEFAULT_SQL_TIMEOUT_MS,
+        MIN_SQL_TIMEOUT_MS,
+        MAX_SQL_TIMEOUT_MS,
+    )
+
+    if not snippet_query:
+        flash("Нельзя сохранить пустой SQL-сниппет.", "error")
+        return redirect(
+            url_for(
+                "sql_console",
+                db_name=db_name,
+                table=current_table,
+                return_page=return_page,
+                return_limit=return_limit,
+                tables_q=tables_q,
+                timeout_ms=timeout_ms,
+            )
+        )
+
+    snippet_id = save_sql_snippet(db_name, snippet_name, snippet_query)
+    flash("SQL-сниппет сохранен в Favorites.", "success")
+    return redirect(
+        url_for(
+            "sql_console",
+            db_name=db_name,
+            snippet_id=snippet_id,
+            table=current_table,
+            return_page=return_page,
+            return_limit=return_limit,
+            tables_q=tables_q,
+            timeout_ms=timeout_ms,
+        )
+    )
+
+
+@app.route("/databases/<db_name>/sql/snippets/<snippet_id>/delete", methods=["POST"])
+def delete_sql_snippet_route(db_name: str, snippet_id: str) -> Any:
+    if not is_authenticated():
+        return redirect(url_for("login"))
+
+    if not safe_database_name(db_name):
+        abort(404)
+
+    current_table = request.form.get("table", "").strip()
+    if current_table and not safe_database_name(current_table):
+        current_table = ""
+    return_page, return_limit, tables_q = parse_table_return_state(request.form)
+    timeout_ms = coerce_int_in_range(
+        request.form.get("timeout_ms", session.get("sql_timeout_ms", DEFAULT_SQL_TIMEOUT_MS)),
+        DEFAULT_SQL_TIMEOUT_MS,
+        MIN_SQL_TIMEOUT_MS,
+        MAX_SQL_TIMEOUT_MS,
+    )
+
+    if delete_sql_snippet(db_name, snippet_id):
+        flash("Сниппет удален из Favorites.", "success")
+    else:
+        flash("Сниппет не найден или уже удален.", "error")
+
+    return redirect(
+        url_for(
+            "sql_console",
+            db_name=db_name,
+            table=current_table,
+            return_page=return_page,
+            return_limit=return_limit,
+            tables_q=tables_q,
+            timeout_ms=timeout_ms,
+        )
     )
 
 

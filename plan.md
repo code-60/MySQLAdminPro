@@ -69,7 +69,7 @@
 - [ ] SQL formatting button
 - [ ] SQL autocomplete (tables/columns)
 - [ ] Explain plan view (`EXPLAIN`)
-- [ ] Saved query snippets (favorites)
+- [x] Saved query snippets (favorites)
 - [x] Export result set (CSV/JSON)
 - [ ] Query history persistence (file/db, not only session)
 
