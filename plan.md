@@ -65,8 +65,8 @@
 
 ### 2.4 SQL console v2
 
-- [ ] Multi-tab SQL editor
-- [ ] SQL formatting button
+- [x] Multi-tab SQL editor
+- [x] SQL formatting button
 - [x] SQL autocomplete (tables/columns)
 - [x] Explain plan view (`EXPLAIN`)
 - [x] Saved query snippets (favorites)
