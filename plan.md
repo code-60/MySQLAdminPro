@@ -70,7 +70,7 @@
 - [ ] SQL autocomplete (tables/columns)
 - [ ] Explain plan view (`EXPLAIN`)
 - [ ] Saved query snippets (favorites)
-- [ ] Export result set (CSV/JSON)
+- [x] Export result set (CSV/JSON)
 - [ ] Query history persistence (file/db, not only session)
 
 ---

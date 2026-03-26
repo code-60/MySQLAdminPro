@@ -1492,8 +1492,12 @@ def sql_console(db_name: str) -> Any:
         abort(404)
 
     query_text = "SELECT NOW();"
+    export_format = ""
     if request.method == "POST":
         query_text = request.form.get("sql_query", "SELECT NOW();").strip()
+        export_format = request.form.get("export_format", "").strip().lower()
+        if export_format not in {"", "csv", "json"}:
+            export_format = ""
     result_columns: list[str] = []
     result_rows: list[list[str]] = []
     result_count = 0
@@ -1577,24 +1581,77 @@ def sql_console(db_name: str) -> Any:
 
                             if cur.description:
                                 result_columns = [str(column[0]) for column in cur.description]
-                                raw_rows = cur.fetchmany(MAX_SQL_PREVIEW_ROWS)
+                                raw_rows = cur.fetchmany(MAX_SQL_PREVIEW_ROWS + 1)
+                                limited_rows = raw_rows[:MAX_SQL_PREVIEW_ROWS]
                                 result_rows = [
                                     [format_cell(row.get(column)) for column in result_columns]
-                                    for row in raw_rows
+                                    for row in limited_rows
                                 ]
                                 result_count = len(result_rows)
-                                result_truncated = result_count >= MAX_SQL_PREVIEW_ROWS
+                                result_truncated = len(raw_rows) > MAX_SQL_PREVIEW_ROWS
                                 push_sql_history(db_name, query_text)
                                 sql_history = [item for item in get_sql_history() if item["db"] == db_name]
+
+                                if export_format in {"csv", "json"}:
+                                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                                    if export_format == "csv":
+                                        output = io.StringIO()
+                                        writer = csv.writer(output)
+                                        writer.writerow(result_columns)
+                                        for row in limited_rows:
+                                            writer.writerow(
+                                                [
+                                                    format_export_value(row.get(column))
+                                                    for column in result_columns
+                                                ]
+                                            )
+                                        response = make_response(output.getvalue())
+                                        filename = f"sql_result_{db_name}_{timestamp}.csv"
+                                        response.headers["Content-Type"] = (
+                                            "text/csv; charset=utf-8"
+                                        )
+                                    else:
+                                        export_payload = [
+                                            {
+                                                column: json_export_value(row.get(column))
+                                                for column in result_columns
+                                            }
+                                            for row in limited_rows
+                                        ]
+                                        response = make_response(
+                                            json.dumps(
+                                                export_payload,
+                                                ensure_ascii=False,
+                                                indent=2,
+                                            )
+                                        )
+                                        filename = f"sql_result_{db_name}_{timestamp}.json"
+                                        response.headers["Content-Type"] = (
+                                            "application/json; charset=utf-8"
+                                        )
+
+                                    response.headers["Content-Disposition"] = (
+                                        f'attachment; filename="{filename}"'
+                                    )
+                                    if result_truncated:
+                                        response.headers["X-Result-Truncated"] = "1"
+                                    return response
+
                                 flash("SQL-запрос выполнен.", "success")
                             else:
+                                if export_format in {"csv", "json"}:
+                                    flash(
+                                        "Экспорт доступен только для запросов, возвращающих таблицу данных.",
+                                        "error",
+                                    )
                                 affected_rows = max(cur.rowcount, 0)
                                 push_sql_history(db_name, query_text)
                                 sql_history = [item for item in get_sql_history() if item["db"] == db_name]
-                                flash(
-                                    f"SQL-запрос выполнен. Затронуто строк: {affected_rows}.",
-                                    "success",
-                                )
+                                if export_format not in {"csv", "json"}:
+                                    flash(
+                                        f"SQL-запрос выполнен. Затронуто строк: {affected_rows}.",
+                                        "success",
+                                    )
                     except Exception as exc:
                         flash(f"Ошибка SQL: {exc}", "error")
         finally:

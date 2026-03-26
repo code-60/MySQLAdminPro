@@ -108,19 +108,24 @@
                             <span class="text-xs text-slate-400">Исполнение в контексте базы: {{ current_db }}</span>
                             <div class="flex items-center gap-2">
                                 <button id="sql-cancel" type="button" class="hidden px-4 py-2 border border-slate-300 rounded-lg text-xs font-semibold text-slate-700 hover:border-slate-900">Остановить ожидание</button>
-                                <button id="sql-submit" type="submit" data-loading-text="Выполнение..." class="px-4 py-2 bg-slate-950 text-white rounded-lg text-xs font-semibold hover:bg-slate-800">Выполнить</button>
+                                <button id="sql-submit" type="submit" name="export_format" value="" data-loading-text="Выполнение..." class="sql-submit-button px-4 py-2 bg-slate-950 text-white rounded-lg text-xs font-semibold hover:bg-slate-800">Выполнить</button>
+                                <button type="submit" name="export_format" value="csv" data-loading-text="Экспорт CSV..." class="sql-submit-button px-4 py-2 border border-slate-300 rounded-lg text-xs font-semibold text-slate-700 hover:border-slate-900">Export CSV</button>
+                                <button type="submit" name="export_format" value="json" data-loading-text="Экспорт JSON..." class="sql-submit-button px-4 py-2 border border-slate-300 rounded-lg text-xs font-semibold text-slate-700 hover:border-slate-900">Export JSON</button>
                             </div>
+                        </div>
+                        <div class="md:col-span-3 text-[11px] text-slate-400">
+                            Export ограничен первыми 500 строками результата.
                         </div>
                     </div>
                 </form>
 
-                <div class="mb-5 bg-white border border-slate-200 rounded-xl shadow-sm p-4">
+                <div class="mb-5 bg-white border border-slate-200 rounded-xl shadow-sm p-4 min-h-[240px]">
                     <p class="text-[11px] font-bold text-slate-400 uppercase tracking-widest mb-3">История запросов (сессия)</p>
                     {% if sql_history %}
-                    <div class="space-y-2 max-h-44 overflow-y-auto">
+                    <div class="space-y-2 max-h-60 overflow-y-auto">
                         {% for item in sql_history %}
                         <a href="{{ url_for('sql_console', db_name=current_db, history=loop.index0, table=current_table, return_page=return_page, return_limit=return_limit, tables_q=tables_q) }}" class="block border border-slate-200 rounded-lg px-3 py-2 hover:border-slate-900 transition-colors">
-                            <div class="mono text-xs text-slate-700 truncate">{{ item.query }}</div>
+                            <div class="mono text-xs text-slate-700 whitespace-pre-wrap break-all leading-5">{{ item.query }}</div>
                             <div class="text-[10px] text-slate-400 mt-1">{{ item.executed_at }}</div>
                         </a>
                         {% endfor %}
@@ -188,6 +193,7 @@
         const sqlQuery = document.getElementById('sql-query');
         const sqlSubmit = document.getElementById('sql-submit');
         const sqlCancel = document.getElementById('sql-cancel');
+        const sqlSubmitButtons = Array.from(document.querySelectorAll('.sql-submit-button'));
 
         function isDestructiveSql(queryText) {
             const trimmed = queryText.trim().toUpperCase();
@@ -204,18 +210,25 @@
                     }
                 }
 
-                sqlSubmit.dataset.originalText = sqlSubmit.textContent;
-                sqlSubmit.textContent = sqlSubmit.getAttribute('data-loading-text') || 'Выполнение...';
-                sqlSubmit.disabled = true;
-                sqlSubmit.classList.add('opacity-70', 'cursor-not-allowed');
+                const triggerButton = event.submitter && event.submitter.tagName === 'BUTTON'
+                    ? event.submitter
+                    : sqlSubmit;
+                triggerButton.dataset.originalText = triggerButton.textContent;
+                triggerButton.textContent = triggerButton.getAttribute('data-loading-text') || 'Выполнение...';
+                sqlSubmitButtons.forEach((button) => {
+                    button.disabled = true;
+                    button.classList.add('opacity-70', 'cursor-not-allowed');
+                });
                 sqlCancel.classList.remove('hidden');
             });
 
             sqlCancel.addEventListener('click', () => {
                 window.stop();
-                sqlSubmit.disabled = false;
-                sqlSubmit.textContent = sqlSubmit.dataset.originalText || 'Выполнить';
-                sqlSubmit.classList.remove('opacity-70', 'cursor-not-allowed');
+                sqlSubmitButtons.forEach((button) => {
+                    button.disabled = false;
+                    button.classList.remove('opacity-70', 'cursor-not-allowed');
+                    button.textContent = button.dataset.originalText || button.textContent;
+                });
                 sqlCancel.classList.add('hidden');
             });
         }
